@@ -98,7 +98,7 @@ filter_chains:
           - {label: SIMPLE,    cluster: a-qwen3-06b, model: a-qwen3-06b}
           - {label: MEDIUM,    cluster: a-qwen3-06b, model: a-qwen3-06b}
           - {label: COMPLEX,   cluster: a-qwen3-8b,  model: a-qwen3-8b}
-          - {label: REASONING, cluster: a-qwen3-8b,  model: a-qwen3-8b}
+          - {label: REASONING, cluster: a-maas-reasoning, model: publishers/prelude-maas/models/glm-53-flash}
 
       # Belt-and-braces body splice: the beyond-routing filter already rewrites
       # /model itself in the body phase (ReadWrite); this idempotently applies
@@ -121,6 +121,19 @@ filter_chains:
       #   OpenAI server lives under /v1).
       # - trusted_private_endpoints: the in-cluster service DNS resolves to
       #   RFC 1918 addresses, which praxis refuses unless allow-listed here.
+
+      # REASONING turns escalate to the MaaS gateway's glm-5.3-flash (the
+      # strong shared tier): the SAME endpoint + model on every arm, so
+      # per-arm deltas on REASONING turns are the measurement noise floor.
+      # The key comes from the maas-api-key Secret (MAAS_API_KEY env, already
+      # wired in the Deployment).
+      - filter: credential_injection
+        clusters:
+          - name: a-maas-reasoning
+            header: "Authorization"
+            header_prefix: "Bearer "
+            env_var: MAAS_API_KEY
+
       - filter: load_balancer
         clusters:
           - name: a-qwen3-06b
@@ -143,6 +156,21 @@ filter_chains:
               verify: false
             trusted_private_endpoints:
               - "a-qwen3-8b-kserve-workload-svc"
+            connection_timeout_ms: 5000
+            total_connection_timeout_ms: 10000
+          - name: a-maas-reasoning
+            endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev:443"
+            http:
+              authority: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              base_path: /v1
+            tls:
+              sni: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              verify: true
+            trusted_private_endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev"
+            # The upstream is across the cluster router: bound the TCP and
+            # TCP+TLS handshakes so a stalled gateway fails fast.
             connection_timeout_ms: 5000
             total_connection_timeout_ms: 10000
 
@@ -192,7 +220,7 @@ filter_chains:
           - {label: SIMPLE,    cluster: b-qwen3-06b, model: b-qwen3-06b}
           - {label: MEDIUM,    cluster: b-qwen3-06b, model: b-qwen3-06b}
           - {label: COMPLEX,   cluster: b-qwen3-8b,  model: b-qwen3-8b}
-          - {label: REASONING, cluster: b-qwen3-8b,  model: b-qwen3-8b}
+          - {label: REASONING, cluster: b-maas-reasoning, model: publishers/prelude-maas/models/glm-53-flash}
 
       - filter: json_body
         content_types:
@@ -202,6 +230,19 @@ filter_chains:
         request_replace:
           - pointer: /model
             metadata: llm_d_sc.model
+
+
+      # REASONING turns escalate to the MaaS gateway's glm-5.3-flash (the
+      # strong shared tier): the SAME endpoint + model on every arm, so
+      # per-arm deltas on REASONING turns are the measurement noise floor.
+      # The key comes from the maas-api-key Secret (MAAS_API_KEY env, already
+      # wired in the Deployment).
+      - filter: credential_injection
+        clusters:
+          - name: b-maas-reasoning
+            header: "Authorization"
+            header_prefix: "Bearer "
+            env_var: MAAS_API_KEY
 
       - filter: load_balancer
         clusters:
@@ -225,6 +266,21 @@ filter_chains:
               verify: false
             trusted_private_endpoints:
               - "b-qwen3-8b-kserve-workload-svc"
+            connection_timeout_ms: 5000
+            total_connection_timeout_ms: 10000
+          - name: b-maas-reasoning
+            endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev:443"
+            http:
+              authority: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              base_path: /v1
+            tls:
+              sni: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              verify: true
+            trusted_private_endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev"
+            # The upstream is across the cluster router: bound the TCP and
+            # TCP+TLS handshakes so a stalled gateway fails fast.
             connection_timeout_ms: 5000
             total_connection_timeout_ms: 10000
 
@@ -270,7 +326,7 @@ filter_chains:
           - {label: SIMPLE,    cluster: c-qwen3-06b, model: c-qwen3-06b}
           - {label: MEDIUM,    cluster: c-qwen3-06b, model: c-qwen3-06b}
           - {label: COMPLEX,   cluster: c-qwen3-8b,  model: c-qwen3-8b}
-          - {label: REASONING, cluster: c-qwen3-8b,  model: c-qwen3-8b}
+          - {label: REASONING, cluster: c-maas-reasoning, model: publishers/prelude-maas/models/glm-53-flash}
 
       - filter: json_body
         content_types:
@@ -280,6 +336,19 @@ filter_chains:
         request_replace:
           - pointer: /model
             metadata: llm_d_sc.model
+
+
+      # REASONING turns escalate to the MaaS gateway's glm-5.3-flash (the
+      # strong shared tier): the SAME endpoint + model on every arm, so
+      # per-arm deltas on REASONING turns are the measurement noise floor.
+      # The key comes from the maas-api-key Secret (MAAS_API_KEY env, already
+      # wired in the Deployment).
+      - filter: credential_injection
+        clusters:
+          - name: c-maas-reasoning
+            header: "Authorization"
+            header_prefix: "Bearer "
+            env_var: MAAS_API_KEY
 
       - filter: load_balancer
         clusters:
@@ -303,5 +372,20 @@ filter_chains:
               verify: false
             trusted_private_endpoints:
               - "c-qwen3-8b-kserve-workload-svc"
+            connection_timeout_ms: 5000
+            total_connection_timeout_ms: 10000
+          - name: c-maas-reasoning
+            endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev:443"
+            http:
+              authority: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              base_path: /v1
+            tls:
+              sni: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              verify: true
+            trusted_private_endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev"
+            # The upstream is across the cluster router: bound the TCP and
+            # TCP+TLS handshakes so a stalled gateway fails fast.
             connection_timeout_ms: 5000
             total_connection_timeout_ms: 10000

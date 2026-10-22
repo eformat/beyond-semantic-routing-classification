@@ -1,0 +1,47 @@
+# The phase-2 arm Routes: one external TLS Route per substrate arm, so the
+# laptop (OpenCode's custom providers) can pick the SUBSTRATE by endpoint —
+# the "client picks the arm by endpoint" architecture. The main praxis Route
+# (50-route.yaml) stays on the arm-a listener (:8080).
+#
+#   praxis          → :8080  arm A — native APC, kvcached off
+#   praxis-arm-b    → :8081  arm B — kvcached, no APC
+#   praxis-arm-c    → :8082  arm C — kvcached + APC
+#
+# Same shape as 50-route.yaml; only the targetPort differs. No spec.host on
+# purpose: the cluster assigns hosts under the apps domain
+# (praxis-arm-b-user-mhepburn.apps.ocp.cloud.rhai-tmm.dev etc.).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: praxis-arm-b
+  labels:
+    app.kubernetes.io/name: praxis
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  to:
+    kind: Service
+    name: praxis
+    weight: 100
+  port:
+    targetPort: http-arm-b
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: praxis-arm-c
+  labels:
+    app.kubernetes.io/name: praxis
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  to:
+    kind: Service
+    name: praxis
+    weight: 100
+  port:
+    targetPort: http-arm-c
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

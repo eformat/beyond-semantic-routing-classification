@@ -257,10 +257,10 @@ class Store:
                 )
             return {
                 "now": now,
-                "uptime_s": round(now - self.started),
                 "stats": {
                     "records_total": self.records_total,
                     "decisions_total": self.decisions_total,
+                    "uptime_s": round(now - self.started),
                     "labels": dict(self.label_counts),
                     "models": dict(self.model_counts),
                     "upstream_status": dict(self.status_counts),

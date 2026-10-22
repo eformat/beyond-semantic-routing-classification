@@ -30,10 +30,14 @@ resources:
   - 65-collector-deployment.yaml
   - 70-collector-service.yaml
   - 75-collector-route.yaml
-  # Phase 2 Arm A: the article replication pair (Qwen3-0.6B + Qwen3-8B) on
-  # unreserved MIG slices, prefix-cached serving. Experiment fleet — MaaS
-  # routing stays off.
-  - 85-phase2-llmisvc.yaml
+  # Phase 2 Arm A: the RHOAI-reference pair (Qwen3-0.6B + Qwen3-8B on the
+  # rhaiis vLLM 0.13 stack) — RETIRED from the cluster for now (frees 2 MIG
+  # slots); the manifests stay here as the as-deployed RHOAI baseline, one
+  # `make deploy` re-adds it. NOT in kustomization resources while retired.
+  # - 85-phase2-llmisvc.yaml
+  # Phase 2 arm Routes: one external TLS Route per substrate arm (the laptop
+  # picks the substrate by endpoint — praxis-arm-b/praxis-arm-c hosts).
+  - 95-arm-routes.yaml
   # Phase 2 three-arm substrate comparison: six LLMISVCs on the kvcached
   # image (a- = native APC, b- = kvcached no-APC, c- = kvcached + APC), all
   # on the SAME engine (vLLM 0.30).

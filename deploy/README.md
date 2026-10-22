@@ -230,8 +230,12 @@ prompt ───────┤  listener :8081 ─ chain B ─→ b-qwen3-06b, 
 
 - Cluster names carry the arm prefix (`a-`/`b-`/`c-`), so the access log's
   `cluster` field shows which arm served each turn; each arm's chain routes
-  per label exactly like the phase-2 map (SIMPLE/MEDIUM → 0.6b,
-  COMPLEX/REASONING → 8b) — per-model LLMISVC endpoints on every arm
+  per label: SIMPLE/MEDIUM → the arm's 0.6b, COMPLEX → the arm's 8b, and
+  REASONING → **the MaaS gateway's glm-5.3-flash** (`<arm>-maas-reasoning`
+  clusters, all pointing at the same MaaS endpoint — identical across arms,
+  so per-arm deltas on REASONING turns are the measurement noise floor). The
+  arm prefix on the MaaS cluster names keeps the collector's lane grouping
+  intact (parse_session derives the arm suffix from the cluster-name prefix).
 - The SAME conversation replayed through all three ports is the comparison;
   the substrate is the only difference
 - praxis /ready goes 503 while ANY listener's clusters have zero healthy
