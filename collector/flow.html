@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>beyond-semantic-routing — live decisions</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#2d3646;
+    --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff;
+    --simple:#3fb96f; --medium:#e0a93f; --complex:#e05c5c; --reasoning:#a06fe0; --none:#6b7280;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{display:flex;align-items:baseline;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line)}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .sub{color:var(--dim);font-size:12px}
+  #live{margin-left:auto;font-size:12px;color:var(--dim)}
+  #live .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--simple);margin-right:6px;animation:pulse 1.6s infinite}
+  #live.down .dot{background:var(--complex);animation:none}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  main{display:grid;grid-template-columns:1fr 300px;gap:14px;padding:14px 20px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
+  .panel h2{font-size:12px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.8px;color:var(--dim)}
+  #lanes{overflow-x:auto}
+  svg{display:block}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;color:var(--dim)}
+  .legend b{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  #tooltip{position:fixed;pointer-events:none;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:12px;display:none;z-index:10;max-width:320px;box-shadow:0 4px 14px rgba(0,0,0,.5)}
+  #tooltip .t{color:var(--dim);font-size:11px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  td{padding:3px 0;vertical-align:top}
+  td.k{color:var(--dim);white-space:nowrap;padding-right:10px}
+  td.v{text-align:right;font-variant-numeric:tabular-nums}
+  .bar{height:8px;border-radius:4px;background:var(--panel2);overflow:hidden;margin:2px 0 8px}
+  .bar i{display:block;height:100%;border-radius:4px}
+  .modelrow{margin-bottom:8px}
+  .modelrow .name{font-size:12px;display:flex;justify-content:space-between}
+  .modelrow .name span:last-child{color:var(--dim)}
+  #arms table{margin-bottom:2px}
+  #arms th{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);text-align:right;font-weight:600;padding:2px 0 4px}
+  #arms th:first-child{text-align:left}
+  #arms td{border-top:1px solid var(--line);padding:5px 0}
+  #arms td.v{font-variant-numeric:tabular-nums}
+  #arms .conv{font-size:11px;color:var(--dim);margin:10px 0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  footer{padding:8px 20px;color:var(--dim);font-size:11px;border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <h1>beyond-semantic-routing — live decisions</h1>
+  <span class="sub">praxis → llm-d-sc → tier splice → MaaS</span>
+  <span id="live"><span class="dot"></span>connecting…</span>
+</header>
+
+<main>
+  <div style="display:grid;gap:14px;align-content:start">
+    <div class="panel">
+      <h2>Conversation lanes · one node per routed turn</h2>
+      <div class="legend">
+        <span><b style="background:var(--simple)"></b>SIMPLE</span>
+        <span><b style="background:var(--medium)"></b>MEDIUM</span>
+        <span><b style="background:var(--complex)"></b>COMPLEX</span>
+        <span><b style="background:var(--reasoning)"></b>REASONING</span>
+        <span><b style="background:var(--none)"></b>other / no decision</span>
+      </div>
+      <div id="lanes"><svg id="chart" width="100%" height="120"></svg></div>
+      <div class="legend" style="margin-top:10px;margin-bottom:0">
+        <span><b style="background:var(--accent)"></b>arm A · native APC</span>
+        <span><b style="background:var(--reasoning)"></b>arm B · kvcached no-APC</span>
+        <span><b style="background:var(--medium)"></b>arm C · kvcached APC</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Arm comparison · same conversation, three substrates</h2>
+      <div id="arms"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Routing stats</h2>
+    <table id="stats"></table>
+    <h2 style="margin-top:16px">Decisions by tier</h2>
+    <div id="tiers"></div>
+    <h2 style="margin-top:16px">Models served</h2>
+    <div id="models"></div>
+  </div>
+</main>
+
+<div id="tooltip"></div>
+<footer>collector: /snapshot · /events · /metrics (Prometheus) — the phase-2 view: the A/B/C substrate comparison (same conversation replayed through :8080/:8081/:8082)</footer>
+
+<script>
+"use strict";
+const LABEL_COLOR = {SIMPLE:"var(--simple)",MEDIUM:"var(--medium)",COMPLEX:"var(--complex)",REASONING:"var(--reasoning)"};
+const colorFor = l => LABEL_COLOR[l] || "var(--none)";
+// PHASE 2: the substrate arms — the lane id suffix (:a / :b / :c) is the arm
+// (the phase-2 cluster names carry the arm prefix; parse_session appends it).
+const ARM_SUBSTRATE = {a:"native APC · static", b:"kvcached · no APC", c:"kvcached · APC"};
+const ARM_COLOR = {a:"var(--accent)", b:"var(--reasoning)", c:"var(--medium)"};
+const laneBase = id => id.replace(/:[abc]$/, "");
+const laneArm = id => (id.match(/:([abc])$/)||[])[1] || null;
+const median = arr => { if (!arr.length) return null; const s=[...arr].sort((x,y)=>x-y); const m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; };
+const esc = s => String(s??"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const shortModel = m => (m && m.includes("/")) ? m.split("/").pop() : (m || "-");
+const tip = document.getElementById("tooltip");
+let lastSeq = 0, renderW = 0;
+
+function showTip(evt, turn) {
+  const armBadge = turn.arm ? ` · <b>arm ${esc(turn.arm.toUpperCase())}</b>` : "";
+  tip.innerHTML = `<div><b style="color:${colorFor(turn.label)}">${esc(turn.label||"-")}</b> · score ${esc(turn.score||"-")}${armBadge}</div>
+    <div class="t">model: ${esc(shortModel(turn.model))}</div>
+    <div style="margin:4px 0;border-left:2px solid var(--line);padding-left:8px;color:var(--fg)">${esc(turn.prompt||"(no prompt captured)")}</div>
+    <div class="t">classify: ${esc(turn.latency_us!=null?(turn.latency_us/1000).toFixed(1)+"ms":"-")} · request: ${esc(turn.duration_ms!=null?turn.duration_ms+"ms":"-")}</div>
+    <div class="t">status: ${esc(turn.status)} · ${esc(turn.path||"")} · turn ${esc(turn.turns??"?")}</div>`;
+  tip.style.display = "block";
+  const pad = 14;
+  tip.style.left = Math.min(evt.clientX + pad, innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top  = Math.min(evt.clientY + pad, innerHeight - tip.offsetHeight - 8) + "px";
+}
+const hideTip = () => tip.style.display = "none";
+
+function renderLanes(sessions) {
+  const container = document.getElementById("lanes");
+  renderW = container.clientWidth - 20;
+  const laneH = 74, padL = 150, gap = 46;
+  // newest conversation on top; arms of one conversation adjacent, a→b→c
+  const ordered = [...sessions].sort((a,b) => {
+    const ab = laneBase(a.id), bb = laneBase(b.id);
+    if (ab === bb) return (laneArm(a.id)||"").localeCompare(laneArm(b.id)||"");
+    const at = Math.max(...a.turns.map(t => t.ts||0));
+    const bt = Math.max(...b.turns.map(t => t.ts||0));
+    return bt - at;
+  });
+  const height = Math.max(120, ordered.length * laneH + 20);
+  let svg = `<svg id="chart" width="100%" height="${height}" viewBox="0 0 ${renderW} ${height}" preserveAspectRatio="none">`;
+  ordered.forEach((s, i) => {
+    const y = i * laneH + 40;
+    // Lane label: the conversation's opening prompt (what makes it
+    // identifiable), falling back to the session id when no prompt was
+    // captured. The lane id suffix (:a / :b / :c) is the substrate arm — the
+    // same conversation replayed through the three arms renders as three
+    // adjacent lanes (grouped a→b→c above).
+    const arm = laneArm(s.id);
+    const opening = s.turns.find(t => t.prompt) || {};
+    const label = (opening.prompt || s.id).slice(0, 46) + ((opening.prompt || s.id).length > 46 ? "…" : "");
+    const base = laneBase(s.id);
+    const idShort = (base.length > 22 ? base.slice(0, 21) + "…" : base) + (arm ? ` [arm ${arm.toUpperCase()}]` : "");
+    const turns = s.turns;
+    const x0 = padL + 10, xN = Math.max(x0 + gap, renderW - 20);
+    const step = turns.length > 1 ? (xN - x0) / (turns.length - 1) : 0;
+    svg += `<text x="6" y="${y - 14}" fill="var(--fg)" font-size="11">${esc(label)}</text>`;
+    svg += `<text x="6" y="${y + 2}" fill="${arm ? ARM_COLOR[arm] : "var(--dim)"}" font-size="10" font-family="monospace">${esc(idShort)}${arm ? ` · ${esc(ARM_SUBSTRATE[arm]||"")}` : ""} · ${turns.length} turn${turns.length===1?"":"s"}</text>`;
+    const lastL = turns.at(-1);
+    svg += `<text x="6" y="${y + 18}" fill="${colorFor(lastL.label)}" font-size="10">${esc(shortModel(lastL.model))}</text>`;
+    // timeline + nodes
+    svg += `<line x1="${x0}" y1="${y}" x2="${xN}" y2="${y}" stroke="var(--line)" stroke-width="1"/>`;
+    turns.forEach((t, j) => {
+      const cx = turns.length > 1 ? x0 + j * step : x0;
+      const hasScore = t.score != null;
+      const r = 7 + (hasScore ? Math.min(4, (parseFloat(t.score) - 0.9) * 30) : 0);
+      const c = colorFor(t.label);
+      svg += `<circle cx="${cx}" cy="${y}" r="${r.toFixed(1)}" fill="${c}" fill-opacity="0.92" stroke="#0d1117" stroke-width="1.5" class="turn" data-seq="${t.seq}"><title/></circle>`;
+      if (t.status && !String(t.status).startsWith("2")) {
+        svg += `<text x="${cx}" y="${y - r - 5}" fill="var(--complex)" font-size="9" text-anchor="middle">${esc(t.status)}</text>`;
+      }
+    });
+  });
+  svg += "</svg>";
+  container.innerHTML = svg;
+  container.querySelectorAll(".turn").forEach(node => {
+    const seq = +node.dataset.seq;
+    const turn = ordered.flatMap(s => s.turns).find(t => t.seq === seq);
+    node.addEventListener("mousemove", e => turn && showTip(e, turn));
+    node.addEventListener("mouseleave", hideTip);
+  });
+}
+
+function renderArms(sessions) {
+  const el = document.getElementById("arms");
+  // group the lanes by conversation base (the arm suffix stripped); a group
+  // with 2+ arms is a substrate comparison — the same fixture replayed
+  // through :8080/:8081/:8082.
+  const groups = new Map();
+  sessions.forEach(s => {
+    const base = laneBase(s.id);
+    if (!groups.has(base)) groups.set(base, []);
+    groups.get(base).push(s);
+  });
+  const comparisons = [...groups.entries()].filter(([, g]) => g.length > 1)
+    .sort((x,y) => latestTs(y[1]) - latestTs(x[1]));
+  if (!comparisons.length) {
+    el.innerHTML = '<span style="color:var(--dim);font-size:12px">no multi-arm conversation yet — replay one fixture through :8080/:8081/:8082</span>';
+    return;
+  }
+  el.innerHTML = comparisons.map(([base, group]) => {
+    const rows = group
+      .sort((a,b) => (laneArm(a.id)||"").localeCompare(laneArm(b.id)||""))
+      .map(s => {
+        const arm = laneArm(s.id) || "?";
+        const durs = s.turns.map(t => t.duration_ms).filter(v => v != null);
+        const total = durs.reduce((x,y) => x+y, 0);
+        const lats = s.turns.map(t => t.latency_us).filter(v => v != null);
+        const p50 = median(lats);
+        const models = [...new Set(s.turns.map(t => shortModel(t.model)).filter(m => m && m !== "-"))].join(", ") || "—";
+        return `<tr>
+          <td class="k" style="color:${ARM_COLOR[arm]||"var(--dim)"}"><b>${esc(arm.toUpperCase())}</b> ${esc(ARM_SUBSTRATE[arm]||"")}</td>
+          <td class="v">${s.turns.length}</td>
+          <td class="v">${esc(models)}</td>
+          <td class="v">${durs.length ? (total/1000).toFixed(2)+"s" : "—"}</td>
+          <td class="v">${p50 != null ? (p50/1000).toFixed(1)+"ms" : "—"}</td>
+        </tr>`;
+      }).join("");
+    const opening = group.flatMap(s => s.turns).find(t => t.prompt) || {};
+    const convLabel = (opening.prompt || base).slice(0, 72) + ((opening.prompt || base).length > 72 ? "…" : "");
+    return `<div class="conv" title="${esc(convLabel)}">${esc(convLabel)}</div>
+      <table>
+        <tr><th>arm</th><th>turns</th><th>models</th><th>Σ request</th><th>classify p50</th></tr>
+        ${rows}
+      </table>`;
+  }).join("");
+}
+
+const latestTs = group => Math.max(...group.flatMap(s => s.turns.map(t => t.ts||0)));
+
+function bars(el, obj, colors) {
+  const entries = Object.entries(obj);
+  if (!entries.length) { el.innerHTML = '<span style="color:var(--dim);font-size:12px">no data yet</span>'; return; }
+  const max = Math.max(...entries.map(e => e[1]));
+  el.innerHTML = entries.sort((a,b)=>b[1]-a[1]).map(([k,v]) => {
+    const label = k.includes("/") ? k.split("/").pop() : k;
+    const c = colors ? (colors[k] || "var(--accent)") : "var(--accent)";
+    return `<div class="modelrow"><div class="name"><span>${esc(label)}</span><span>${v}</span></div>
+      <div class="bar"><i style="width:${Math.max(4, v/max*100).toFixed(0)}%;background:${c}"></i></div></div>`;
+  }).join("");
+}
+
+function renderStats(st) {
+  const rows = [
+    ["decisions", st.decisions_total],
+    ["records seen", st.records_total],
+    ["sessions", st.active_sessions + " active / " + st.sessions_total],
+    ["decisions/min", st.decisions_per_min],
+    ["classify p50", st.classify_us_p50 != null ? (st.classify_us_p50/1000).toFixed(1) + " ms" : "—"],
+    ["classify p95", st.classify_us_p95 != null ? (st.classify_us_p95/1000).toFixed(1) + " ms" : "—"],
+    ["uptime", Math.round(st.uptime_s/60) + " min"],
+    ["log reconnects", st.log_reconnects],
+  ];
+  document.getElementById("stats").innerHTML =
+    rows.map(([k,v]) => `<tr><td class="k">${k}</td><td class="v">${esc(v)}</td></tr>`).join("");
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/snapshot", {cache: "no-store"});
+    const snap = await r.json();
+    const live = document.getElementById("live");
+    live.classList.remove("down");
+    live.innerHTML = '<span class="dot"></span>live · ' + snap.stats.decisions_total + " decisions";
+    renderLanes(snap.sessions);
+    renderArms(snap.sessions);
+    renderStats(snap.stats);
+    bars(document.getElementById("tiers"), snap.stats.labels, {SIMPLE:"var(--simple)",MEDIUM:"var(--medium)",COMPLEX:"var(--complex)",REASONING:"var(--reasoning)"});
+    bars(document.getElementById("models"), snap.stats.models);
+  } catch (e) {
+    const live = document.getElementById("live");
+    live.classList.add("down");
+    live.innerHTML = '<span class="dot"></span>collector unreachable';
+  }
+}
+
+addEventListener("resize", () => { fetch("/snapshot",{cache:"no-store"}).then(r=>r.json()).then(renderLanes).catch(()=>{}); });
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

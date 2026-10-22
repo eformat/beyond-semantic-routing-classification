@@ -14,6 +14,7 @@
 REGISTRY    := quay.io/eformat
 PRAXIS_TAG  ?= latest
 LLMD_TAG    ?= latest
+COLLECTOR_TAG ?= latest
 
 # Unconditional override (not ?=): an ambient KUBECONFIG must never silently
 # point the deploy at a different cluster.
@@ -27,8 +28,9 @@ LABEL        := app.kubernetes.io/part-of=beyond-semantic-routing
 PRAXIS_IMAGE := $(REGISTRY)/praxis-beyond-routing:$(PRAXIS_TAG)
 LLMD_IMAGE   := $(REGISTRY)/llm-d-sc:$(LLMD_TAG)
 LLMD_CAR     := $(REGISTRY)/llm-d-sc-modelcar:$(LLMD_TAG)
+COLLECTOR_IMAGE := $(REGISTRY)/beyond-routing-collector:$(COLLECTOR_TAG)
 
-.PHONY: help image image-push llmd-sc-image llmd-sc-image-push llmd-sc-modelcar llmd-sc-modelcar-push secret deploy status smoke undeploy
+.PHONY: help image image-push llmd-sc-image llmd-sc-image-push llmd-sc-modelcar llmd-sc-modelcar-push collector-image collector-image-push secret deploy status smoke undeploy
 
 help:
 	@echo "beyond-semantic-routing PoC — make targets"
@@ -36,7 +38,7 @@ help:
 	@grep -E '^[a-z0-9-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN { FS = ":.*?## " } { printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2 }'
 	@echo
-	@echo "Variables: PRAXIS_TAG/LLMD_TAG (image tags), NAMESPACE (deploy target),"
+	@echo "Variables: PRAXIS_TAG/LLMD_TAG/COLLECTOR_TAG (image tags), NAMESPACE (deploy target),"
 	@echo "           MAAS_API_KEY (make secret). KUBECONFIG is pinned in this file."
 
 image: ## Build the praxis-beyond-routing image (praxis v0.7.5 + beyond-routing-filter; long).
@@ -64,6 +66,12 @@ llmd-sc-modelcar: ## Fetch the complexity model (idempotent) + build the ModelCa
 llmd-sc-modelcar-push: ## Push the ModelCar image to quay.io/eformat.
 	podman push $(LLMD_CAR)
 
+collector-image: ## Build the decision-collector image (ubi-minimal + python3 stdlib only).
+	podman build -f Containerfile.collector -t $(COLLECTOR_IMAGE) collector
+
+collector-image-push: ## Push the decision-collector image to quay.io/eformat.
+	podman push $(COLLECTOR_IMAGE)
+
 secret: ## Create the MaaS API key Secret (imperative). Usage: make secret MAAS_API_KEY=sk-oai-...
 ifndef MAAS_API_KEY
 	$(error MAAS_API_KEY is required: make secret MAAS_API_KEY=sk-oai-...)
@@ -74,10 +82,12 @@ endif
 deploy: ## Apply all PoC resources into user-mhepburn (the Secret must exist first).
 	oc apply -k deploy
 
-status: ## Rollout status for both deployments + the resolved Route.
+status: ## Rollout status for all three deployments + the resolved Routes.
 	oc -n $(NAMESPACE) rollout status deploy/llm-d-sc --timeout=180s
 	oc -n $(NAMESPACE) rollout status deploy/praxis --timeout=180s
-	@oc -n $(NAMESPACE) get route praxis -o jsonpath='route: https://{.spec.host}{"\n"}'
+	oc -n $(NAMESPACE) rollout status deploy/collector --timeout=180s
+	@oc -n $(NAMESPACE) get route praxis -o jsonpath='router:    https://{.spec.host}{"\n"}'
+	@oc -n $(NAMESPACE) get route collector -o jsonpath='flow-view: https://{.spec.host}{"\n"}'
 
 smoke: ## Resolve the Route + key from the cluster and run the smoke test.
 	@PRAXIS_ROUTE=$$(oc -n $(NAMESPACE) get route praxis -o jsonpath='{.spec.host}') \

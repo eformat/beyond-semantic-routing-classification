@@ -1,0 +1,134 @@
+# The phase-2 Arm A fleet: the article replication pair on unreserved MIG
+# slices, PREFIX-CACHED serving. These are OUR experiment fleet in
+# user-mhepburn (deploy via this repo's kustomize) — NOT the shared MaaS
+# catalog: maas routing stays off, and the default inference router keeps
+# them off the shared maas.apps path.
+#
+# Shape reference: ~/git/gitops-clusters/applications/prelude-maas/models/
+# (the values files fold hardwareProfile + resources into this raw CRD).
+#
+# Model pinning: Qwen3-0.6B and Qwen3-8B are frozen since 2025-07-26 (the
+# 2507 update line covers only 4B/30B-A3B/235B); vLLM --revision pins the
+# exact commits so the replication numbers are comparable to the article's.
+#
+# Arm A semantics: --enable-prefix-caching keeps each model's conversation
+# prefix cached in its own slice, so switching models between turns carries
+# a re-prefill cost — the switch cost the phase-2 policy balances.
+# Arm B (sardeenz+kvcached, separate deployment) removes exactly that.
+#
+# Tool support: --enable-auto-tool-choice --tool-call-parser=hermes — the
+# Qwen3-original tool template (qwen3_coder is the newer Qwen3.5/3.6 line's
+# parser). Thinking off by default to match the article's non-thinking
+# numbers; chat_template_kwargs.enable_thinking stays the escalation lever.
+#
+# The in-cluster endpoint the phase-2 praxis config points at is the
+# <name>-kserve-workload-svc ClusterIP these create (vLLM on :8000, /v1).
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: qwen3-06b
+  labels:
+    app.kubernetes.io/name: qwen3-06b
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    # KServe's controller propagates this to the created pods: the unreserved
+    # LocalQueue (clusterqueue `unreserved`, which admits against the free
+    # MIG capacity via its cohort) — the `default` clusterqueue has ZERO
+    # mig/gpu quota, so a pod submitted there pends forever.
+    kueue.x-k8s.io/queue-name: unreserved
+  # The ODH hardware-profile annotations are what the running llama-32-3b
+  # LLMISVC carries alongside the queue label — the odh-model-controller
+  # webhook VALIDATES the (name, namespace) pair and drives the queue
+  # assignment (unreserved-mig-18gb -> the unreserved queue).
+  annotations:
+    opendatahub.io/hardware-profile-name: unreserved-mig-18gb
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+spec:
+  model:
+    name: qwen3-06b
+    uri: hf://Qwen/Qwen3-0.6B
+  replicas: 1
+  router:
+    gateway: {}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.1
+        env:
+          - name: VLLM_ADDITIONAL_ARGS
+            value: >-
+              --max-model-len=32768
+              --gpu-memory-utilization=0.90
+              --enable-force-include-usage
+              --enable-prefix-caching
+              --enable-auto-tool-choice
+              --tool-call-parser=hermes
+              --revision=c1899de289a04d12100db370d81485cdf75e47ca
+        resources:
+          limits:
+            cpu: "2"
+            memory: 12Gi
+            nvidia.com/mig-1g.18gb: "1"
+          requests:
+            cpu: "2"
+            memory: 12Gi
+            nvidia.com/mig-1g.18gb: "1"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: qwen3-8b
+  labels:
+    app.kubernetes.io/name: qwen3-8b
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    # Same as qwen3-06b: the unreserved LocalQueue, not the zero-mig-quota
+    # default clusterqueue.
+    kueue.x-k8s.io/queue-name: unreserved
+  annotations:
+    opendatahub.io/hardware-profile-name: unreserved-mig-35gb
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+spec:
+  model:
+    name: qwen3-8b
+    uri: hf://Qwen/Qwen3-8B
+  replicas: 1
+  router:
+    gateway: {}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.1
+        env:
+          - name: VLLM_ADDITIONAL_ARGS
+            value: >-
+              --max-model-len=32768
+              --gpu-memory-utilization=0.90
+              --enable-force-include-usage
+              --enable-prefix-caching
+              --enable-auto-tool-choice
+              --tool-call-parser=hermes
+              --revision=b968826d9c46dd6066d109eabc6255188de91218
+        resources:
+          limits:
+            cpu: "4"
+            memory: 32Gi
+            nvidia.com/mig-2g.35gb: "1"
+          requests:
+            cpu: "4"
+            memory: 32Gi
+            nvidia.com/mig-2g.35gb: "1"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists

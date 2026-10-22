@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "beyond-routing/router",
+  "providers": {
+    "beyond-routing": {
+      "name": "Beyond Semantic Routing (praxis)",
+      "env": ["OPENAI_API_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://praxis-user-mhepburn.apps.ocp.cloud.rhai-tmm.dev",
+        "apiKey": "{env:OPENAI_API_KEY}"
+      },
+      "headers": {
+        "x-session-id": "opencode-router-demo"
+      },
+      "models": {
+        "router": {
+          "modelID": "publishers/prelude-maas/models/llama-32-3b",
+          "name": "Beyond-Routing (tier decides per turn)",
+          "limit": {
+            "context": 131072,
+            "output": 32768
+          }
+        }
+      }
+    }
+  }
+}

@@ -32,6 +32,11 @@ praxis-filter = { version = "0.7.5", git = "https://github.com/praxis-proxy/prax
 prost = "0.14"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Conversation fingerprinting (the session module's stable conversation key:
+# SHA-256 over the first message, hex-truncated). A std DefaultHasher would be
+# zero-dep but is only stable within one rustc version -- a praxis rebuild
+# would silently re-group every conversation lane.
+sha2 = "0.10"
 # NOTE: matches the Praxis v0.7.5 workspace pin exactly; `serde_yaml` must
 # resolve to this crate because `export_filters!` expands to `serde_yaml::Value`.
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }

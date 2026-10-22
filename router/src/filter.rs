@@ -20,7 +20,7 @@ use crate::{
     config::{FILTER_NAME, FailureAction, LlmDScConfig},
     metrics,
     pb::{ClassificationStatus, ClassifyRequest, ClassifyResponse, RankedSignal},
-    prompt::{extract_prompt, truncate_chars},
+    prompt::{conversation_details, extract_prompt, truncate_chars},
 };
 
 // -----------------------------------------------------------------------------
@@ -551,10 +551,15 @@ impl HttpFilter for LlmDScFilter {
             return Ok(FilterAction::Continue);
         }
 
+        // Conversation identity (session observability): publish the
+        // fingerprint + prompt preview + turn count whenever the body carries
+        // a messages array — including the no-prompt paths, where the details
+        // are still what identifies the conversation.
+        self.publish_conversation_metadata(ctx, body.as_deref());
+
         // No prompt is never a 4xx — a classifier filter must not become a
         // request validator.
-        let prompt = body.as_ref().and_then(|body| extract_prompt(body));
-        let Some(prompt) = prompt else {
+        let prompt = body.as_ref().and_then(|body| extract_prompt(body));        let Some(prompt) = prompt else {
             let decision = Decision::fallback(
                 status::SKIPPED_NO_PROMPT,
                 FailureAction::DefaultCluster,
@@ -613,6 +618,11 @@ impl HttpFilter for LlmDScFilter {
 
         // Slow path: the body phase never ran for this request (a driver that
         // called `on_request` directly). Full classification here.
+        // Bytes clone is O(1) (refcounted) — needed because the publish call
+        // takes `&mut ctx` while the body lives inside it.
+        let buffered = ctx.buffered_request_body.clone();
+        self.publish_conversation_metadata(ctx, buffered.as_deref());
+
         let prompt = ctx.buffered_request_body.as_ref().and_then(|body| extract_prompt(body));
         let Some(prompt) = prompt else {
             let decision = Decision::fallback(
@@ -634,6 +644,22 @@ impl HttpFilter for LlmDScFilter {
 }
 
 impl LlmDScFilter {
+    /// Publish the conversation's identity as filter metadata for the
+    /// access-log/collector session dimension (see
+    /// [`prompt::conversation_details`]).
+    ///
+    /// Metadata set here survives the pre-read copy-back and is what the
+    /// access_log's `metadata.llm_d_sc.*` tokens render; the collector groups
+    /// conversation lanes by the fingerprint and shows the preview. Idempotent
+    /// — both hook paths publish for the same body.
+    fn publish_conversation_metadata(&self, ctx: &mut HttpFilterContext<'_>, body: Option<&[u8]>) {
+        let Some(body) = body else { return };
+        let Some(details) = conversation_details(body) else { return };
+        ctx.set_metadata("llm_d_sc.session_fp", details.fingerprint);
+        ctx.set_metadata("llm_d_sc.prompt", details.prompt_preview);
+        ctx.set_metadata("llm_d_sc.turns", details.turns.to_string());
+    }
+
     /// Store the decision in `filter_state` for `on_request`, keyed by this
     /// filter's index (stable pipeline position). `current_filter_id` is always
     /// set by the executor when it runs a hook; without it the decision is only

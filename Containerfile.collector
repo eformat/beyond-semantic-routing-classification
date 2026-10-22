@@ -1,0 +1,19 @@
+# The decision collector: ubi-minimal + python3 (stdlib only, no pip deps —
+# the zero-dependency constraint is deliberate: no supply-chain surface beyond
+# the base image, and the app is small enough that stdlib is the right tool).
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+RUN microdnf --disableplugin=subscription-manager install -y python3 \
+    && microdnf --disableplugin=subscription-manager clean all
+
+COPY collector.py /app/collector.py
+COPY flow.html /app/flow.html
+
+# OpenShift's restricted-v2 SCC assigns the UID; the image runs with any
+# non-root identity.
+USER 1001
+
+EXPOSE 8080
+
+# -u: unbuffered stdout, so container logs stay live for debugging.
+ENTRYPOINT ["python3", "-u", "/app/collector.py"]

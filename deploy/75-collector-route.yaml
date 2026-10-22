@@ -1,0 +1,21 @@
+# Edge-terminated TLS for the flow graphic: the browser opens the collector
+# from the laptop (live SVG, polling /snapshot every 2s). No spec.host on
+# purpose: the cluster assigns one under its apps domain
+# (collector-user-mhepburn.apps.ocp.cloud.rhai-tmm.dev).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: collector
+  labels:
+    app.kubernetes.io/name: collector
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  to:
+    kind: Service
+    name: collector
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

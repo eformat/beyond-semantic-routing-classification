@@ -1,0 +1,19 @@
+# ClusterIP fronting the collector. praxis's future cloud_events filter
+# POSTs to collector.beyond-routing.svc.cluster.local:8080/events on this
+# same name; today the browser reaches the flow graphic through the Route.
+apiVersion: v1
+kind: Service
+metadata:
+  name: collector
+  labels:
+    app.kubernetes.io/name: collector
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: collector
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

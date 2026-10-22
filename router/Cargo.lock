@@ -360,6 +360,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -2587,7 +2588,7 @@ dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-core",
  "serde_json",
- "sha2",
+ "sha2 0.11.1",
  "thiserror",
  "tokio",
  "tracing",
@@ -2620,7 +2621,7 @@ dependencies = [
  "regorus",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.1",
  "stacker",
  "thiserror",
  "tokio",
@@ -2648,7 +2649,7 @@ dependencies = [
  "praxis-policy-orchestration",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.1",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -3515,6 +3516,17 @@ dependencies = [
  "base64 0.22.1",
  "indexmap 2.14.2",
  "rust_decimal",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]

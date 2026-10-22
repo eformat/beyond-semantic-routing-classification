@@ -21,3 +21,16 @@ spec:
       port: 8080
       targetPort: http
       protocol: TCP
+    # PHASE 2: the Arm B data plane — one praxis, one listener per substrate
+    # arm. Chain A on :8080 routes to the prefix-cached slices; chain B on
+    # :8081 to the kvcached no-APC substrate; chain C on :8082 to kvcached +
+    # bounded APC. Clients pick the arm by port; the access log's cluster
+    # field shows which arm served each turn.
+    - name: http-arm-b
+      port: 8081
+      targetPort: http-arm-b
+      protocol: TCP
+    - name: http-arm-c
+      port: 8082
+      targetPort: http-arm-c
+      protocol: TCP

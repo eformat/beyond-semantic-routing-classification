@@ -1,0 +1,31 @@
+# The kvcached vLLM runtime for the phase-2 Arm A/B/C substrate comparison.
+#
+# BASE: the OFFICIAL kvcached pairing (ghcr.io/ovg-project/kvcached-vllm:latest
+# = kvcached-v0.1.6-vllm-v0.30.0) — kvcached requires vLLM >= 0.17 (tested up
+# to 0.30.0), so the rhaiis image's vLLM 0.13 is below the minimum. This image
+# has vllm on PATH and the kvcached_autopatch.pth hook: at Python startup,
+# when ENABLE_KVCACHED=true, wrapt's when_imported patches vLLM at import
+# (kvcached.integration.vllm.autopatch — the VMM layer takes over the KV cache
+# manager). Verification signature at serve time:
+#   [kvcached][INFO] Applying 16 patches for vllm
+#   [kvcached][INFO] Successfully patched vllm: elastic_block_pool, ...
+#
+# This layer only adds OpenShift arbitrary-UID compatibility: the LLMISVC pods
+# run with the restricted-v2 SCC (a random non-root UID), so the cache
+# directories vLLM writes must be writable by ANY uid. The LLMISVC controller
+# supplies writable volumes for the rest (HOME=/home, HF_HUB_CACHE=/models,
+# /tmp).
+#
+# The base is PINNED to the official pairing tag (latest == this tag at the
+# time of the phase-2 build): kvcached v0.1.6 + vLLM 0.30.0.
+FROM ghcr.io/ovg-project/kvcached-vllm:kvcached-v0.1.6-vllm-v0.30.0
+
+USER root
+
+RUN mkdir -p /root/.cache/huggingface /tmp/vllm /home/.cache \
+    && chmod -R 1777 /tmp/vllm /root/.cache /home/.cache
+
+# The LLMISVC controller renders the full vLLM command (`vllm serve
+# /mnt/models --served-model-name <short> <full-path> --port 8000 --ssl...
+# ${VLLM_ADDITIONAL_ARGS}`) — no ENTRYPOINT override: the base image's vllm
+# is on PATH and the controller's script execs it.

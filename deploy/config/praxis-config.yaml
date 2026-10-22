@@ -87,7 +87,14 @@ filter_chains:
       # ten when present, so the defaults are repeated here and the metadata
       # tokens appended. This is the primary live observability for the routing
       # chain: one JSON record per request carrying the routing decision.
+      #
+      # PHASE 1: `request_header.<name>` tokens add the session dimension —
+      # clients (opencode provider, the demo) send `x-session-id` and the
+      # collector groups turns into conversation lanes by it; `user-agent`
+      # separates agent sessions from curl smoke tests. Both are allowlisted
+      # via `request_headers` (v0.7.5: header tokens need their allowlist).
       - filter: access_log
+        request_headers: [user-agent, x-session-id]
         fields:
           - method
           - path
@@ -105,6 +112,16 @@ filter_chains:
           - metadata.llm_d_sc.score
           - metadata.llm_d_sc.cluster
           - metadata.llm_d_sc.latency_us
+          # Session observability (the session module's first piece): the
+          # conversation fingerprint (SHA-256 over messages[0] — stable across
+          # the turns of one conversation), the current turn's prompt preview
+          # (<=120 chars, metadata-safe), and the message count. The collector
+          # groups conversation lanes by the fingerprint and shows the preview.
+          - metadata.llm_d_sc.session_fp
+          - metadata.llm_d_sc.prompt
+          - metadata.llm_d_sc.turns
+          - request_header.user-agent
+          - request_header.x-session-id
 
       # The classifier. Routes every label to the SAME cluster so the existing
       # cluster-selection machinery validates and /ready reflects endpoint

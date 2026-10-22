@@ -59,6 +59,7 @@ pub mod pb {
 
 pub use config::{FailureAction, LlmDScConfig, RouteEntry};
 pub use filter::{Decision, LlmDScFilter, Provenance, Route};
+pub use prompt::{ConversationDetails, PROMPT_PREVIEW_CHARS, conversation_details};
 
 praxis_filter::export_filters! {
     http "llm_d_sc" => LlmDScFilter::from_config,

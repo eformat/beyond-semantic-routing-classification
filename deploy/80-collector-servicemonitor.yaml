@@ -1,0 +1,30 @@
+# ServiceMonitor wiring the collector's /metrics into user-workload
+# Prometheus (UWM is running: prometheus-user-workload-0/1).
+#
+# NOT in kustomization resources (like 00-namespace.yaml), because of a
+# prerequisite outside this repo: UWM only watches namespaces labelled
+# `openshift.io/cluster-monitoring=true`, and user-mhepburn is a PRE-EXISTING
+# user sandbox owned by rhai-tmm.dev/owner=mhepburn — labelling it is a
+# cluster mutation that belongs to the GitOps flow (rhoai-cluster-pool), not
+# to this repo. Once the label lands (or the PoC moves into a dedicated
+# beyond-routing namespace), `oc apply -f 80-collector-servicemonitor.yaml`
+# is the only remaining step; the collector's /metrics is scrape-ready and
+# verifiable directly (curl /metrics) in the meantime.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: collector
+  labels:
+    app.kubernetes.io/name: collector
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: collector
+  namespaceSelector:
+    matchNames:
+      - user-mhepburn
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

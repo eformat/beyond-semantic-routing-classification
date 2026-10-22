@@ -1,6 +1,7 @@
-//! T-U3 (prompt extraction) and T-U4 (char-boundary truncation).
+//! T-U3 (prompt extraction), T-U4 (char-boundary truncation) and the
+//! conversation-details extraction (session observability).
 
-use beyond_routing_filter::prompt::{extract_prompt, truncate_chars};
+use beyond_routing_filter::prompt::{PROMPT_PREVIEW_CHARS, conversation_details, extract_prompt, truncate_chars};
 
 /// Extract from a JSON literal.
 fn extract(json: &str) -> Option<String> {
@@ -171,4 +172,56 @@ fn t_u4_combining_sequences_are_cut_by_scalar_value() {
     let cut = truncate_chars(text, 1);
     assert_eq!(cut, "e");
     assert!(text.starts_with(cut));
+}
+
+// -----------------------------------------------------------------------------
+// Conversation details — the session module's stable conversation key
+// -----------------------------------------------------------------------------
+
+const FIRST_TURN: &str = r#"{"messages":[{"role":"system","content":"You are a coding agent."},{"role":"user","content":"Design a cache eviction policy"}]}"#;
+
+#[test]
+fn conversation_fingerprint_is_stable_across_turns() {
+    // Turn 2 of the same conversation: messages[0] is unchanged, the user
+    // turn is new. The fingerprint must hold; the preview must move.
+    let second_turn = r#"{"messages":[{"role":"system","content":"You are a coding agent."},{"role":"user","content":"Design a cache eviction policy"},{"role":"assistant","content":"Use LRU with..."},{"role":"user","content":"Now compare with LFU"}]}"#;
+
+    let t1 = conversation_details(FIRST_TURN.as_bytes()).expect("messages body");
+    let t2 = conversation_details(second_turn.as_bytes()).expect("messages body");
+
+    assert_eq!(
+        t1.fingerprint, t2.fingerprint,
+        "messages[0] is unchanged across turns: one conversation, one fingerprint"
+    );
+    assert_eq!(t1.prompt_preview, "Design a cache eviction policy");
+    assert_eq!(t2.prompt_preview, "Now compare with LFU");
+    assert_eq!(t1.turns, 2);
+    assert_eq!(t2.turns, 4, "the message count grows per turn");
+}
+
+#[test]
+fn conversation_fingerprint_separates_conversations() {
+    let other = r#"{"messages":[{"role":"system","content":"You are a different agent."},{"role":"user","content":"Design a cache eviction policy"}]}"#;
+    let a = conversation_details(FIRST_TURN.as_bytes()).expect("messages body");
+    let b = conversation_details(other.as_bytes()).expect("messages body");
+    assert_ne!(a.fingerprint, b.fingerprint, "different first message: different conversation");
+}
+
+#[test]
+fn conversation_details_flatten_and_truncate_the_preview() {
+    let long = format!("line one\n\n  line two{}", " x".repeat(200));
+    let body = serde_json::json!({"messages": [{"role": "user", "content": long}]}).to_string();
+    let details = conversation_details(body.as_bytes()).expect("messages body");
+    assert!(!details.prompt_preview.contains('\n'), "flattened to one line");
+    assert!(
+        details.prompt_preview.chars().count() <= PROMPT_PREVIEW_CHARS,
+        "preview is truncated to the metadata-safe length"
+    );
+}
+
+#[test]
+fn conversation_details_reject_non_messages_bodies() {
+    assert!(conversation_details(b"not json").is_none());
+    assert!(conversation_details(br#"{"prompt":"single-shot"}"#).is_none());
+    assert!(conversation_details(br#"{"messages":[]}"#).is_none());
 }

@@ -1,0 +1,58 @@
+# The decision collector: follows the praxis pod's access_log through the
+# in-cluster K8s API (SA from 60-collector-rbac.yaml), groups decisions into
+# sessions by x-session-id, and serves the flow graphic + Prometheus metrics.
+#
+# Zero-dependency Python: stdlib only, so the image is ubi-minimal + python3
+# and carries no supply-chain surface beyond the base. `python3 -u` keeps
+# stdout unbuffered (docker logs stay live).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collector
+  labels:
+    app.kubernetes.io/name: collector
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: collector
+        app.kubernetes.io/part-of: beyond-semantic-routing
+    spec:
+      serviceAccountName: collector
+      containers:
+        - name: collector
+          image: quay.io/eformat/beyond-routing-collector:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+      # The restricted-v2 SCC assigns the UID; ubi-minimal + python3 runs with
+      # any non-root identity.
+      securityContext:
+        runAsNonRoot: true

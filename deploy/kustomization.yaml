@@ -22,6 +22,22 @@ resources:
   - 30-deployment.yaml
   - 40-service.yaml
   - 50-route.yaml
+  # Phase 1: the decision collector (flow graphic + Prometheus metrics).
+  # NOT included: 00-namespace (pre-existing sandbox) and
+  # 80-collector-servicemonitor (needs the UWM namespace label — a GitOps
+  # mutation outside this repo).
+  - 60-collector-rbac.yaml
+  - 65-collector-deployment.yaml
+  - 70-collector-service.yaml
+  - 75-collector-route.yaml
+  # Phase 2 Arm A: the article replication pair (Qwen3-0.6B + Qwen3-8B) on
+  # unreserved MIG slices, prefix-cached serving. Experiment fleet — MaaS
+  # routing stays off.
+  - 85-phase2-llmisvc.yaml
+  # Phase 2 three-arm substrate comparison: six LLMISVCs on the kvcached
+  # image (a- = native APC, b- = kvcached no-APC, c- = kvcached + APC), all
+  # on the SAME engine (vLLM 0.30).
+  - 90-phase2-arms.yaml
 
 # Stable names: the Deployment references `praxis-config` directly, and the
 # deploy flow swaps that ConfigMap's contents to switch config variants.
@@ -32,7 +48,10 @@ generatorOptions:
 
 configMapGenerator:
   # The live config. deploy/config/praxis-config.yaml is the single source of
-  # truth: the same file is validated inside the image build.
+  # truth: the same file is validated inside the image build. To switch the
+  # routing variant to the phase-2 Arm A fleet (Qwen3-0.6B + 8B on MIG
+  # slices), swap the `files:` entry to `praxis.yaml=config/praxis-config-phase2.yaml`
+  # and make deploy (the initContainer re-renders at the next pod start).
   - name: praxis-config
     files:
-      - praxis.yaml=config/praxis-config.yaml
+      - praxis.yaml=config/praxis-config-phase2.yaml

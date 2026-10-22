@@ -86,3 +86,94 @@ fn text_or_array(value: &Value) -> Option<String> {
         _ => None,
     }
 }
+
+// -----------------------------------------------------------------------------
+// Conversation details (session observability)
+// -----------------------------------------------------------------------------
+
+/// The maximum prompt-preview length published as filter metadata.
+///
+/// praxis drops `filter_metadata` values over 256 bytes; a preview well under
+/// that survives the metadata path AND keeps the access-log record legible.
+pub const PROMPT_PREVIEW_CHARS: usize = 120;
+
+/// Conversation identity + current-turn context, extracted from the request
+/// body for session observability (the session module's first piece).
+///
+/// - `fingerprint`: SHA-256 over the **first** message's serialized content,
+///   hex-truncated to 16 chars. `messages[0]` never changes across the turns
+///   of one multi-turn conversation, so this is the stable conversation key:
+///   every turn of the same conversation shares one fingerprint, distinct
+///   conversations stay distinct.
+/// - `prompt_preview`: the current turn's prompt (what the classifier saw),
+///   flattened to one line and truncated.
+/// - `turns`: the message count of the conversation so far.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConversationDetails {
+    /// SHA-256 over the first message's serialized content, hex-truncated to
+    /// 16 chars — the stable conversation key (see the struct docs).
+    pub fingerprint: String,
+    /// The current turn's prompt, flattened to one line and truncated to
+    /// [`PROMPT_PREVIEW_CHARS`].
+    pub prompt_preview: String,
+    /// The message count of the conversation so far.
+    pub turns: usize,
+}
+
+/// Extract [`ConversationDetails`] from a request body.
+///
+/// Returns `None` for a non-JSON body, a body without a `messages` array, or
+/// an empty one. (Completions without `messages` — a bare `prompt`/`input` —
+/// are single-shot by shape: no multi-turn identity to track, and the
+/// prompt itself is already the classifier's input.)
+#[must_use]
+pub fn conversation_details(body: &[u8]) -> Option<ConversationDetails> {
+    let root: Value = serde_json::from_slice(body).ok()?;
+    let messages = root.as_object()?.get("messages")?.as_array()?;
+    if messages.is_empty() {
+        return None;
+    }
+
+    // Fingerprint over the first message's serialized content. Serializing the
+    // Value (rather than hashing raw body bytes) keeps the fingerprint stable
+    // across key-order and whitespace differences in the request envelope.
+    let first = serde_json::to_vec(&messages[0]).ok()?;
+    let fingerprint = hex_prefix(&first, 16);
+
+    let prompt_preview = from_messages(messages)
+        .map(|p| flatten_line(&p))
+        .map(|p| truncate_chars(&p, PROMPT_PREVIEW_CHARS).to_owned())
+        .unwrap_or_default();
+
+    Some(ConversationDetails {
+        fingerprint,
+        prompt_preview,
+        turns: messages.len(),
+    })
+}
+
+/// Lowercase hex of the SHA-256 of `data`, truncated to `chars` characters.
+fn hex_prefix(data: &[u8], chars: usize) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(data);
+    digest.iter().map(|b| format!("{b:02x}")).take(chars).collect()
+}
+
+/// Collapse control characters and whitespace runs to single spaces, so the
+/// preview renders as one line in the access-log record and the flow graphic.
+fn flatten_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() || ch.is_control() {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(ch);
+        }
+    }
+    out
+}

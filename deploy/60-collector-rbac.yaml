@@ -1,0 +1,40 @@
+# Collector identity + read-only log access. The collector consumes the
+# praxis pod's access_log decision records through the in-cluster Kubernetes
+# API, which needs `pods/log get` on this namespace only — deliberately not
+# broader: the collector is an observer, not an operator. (The planned
+# cloud_events flip removes this dependency: praxis POSTs directly to the
+# collector's Service and the SA/RBAC can be retired.)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: collector
+  labels:
+    app.kubernetes.io/name: collector
+    app.kubernetes.io/part-of: beyond-semantic-routing
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: collector-praxis-logs
+  labels:
+    app.kubernetes.io/name: collector
+    app.kubernetes.io/part-of: beyond-semantic-routing
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: collector-praxis-logs
+  labels:
+    app.kubernetes.io/name: collector
+    app.kubernetes.io/part-of: beyond-semantic-routing
+subjects:
+  - kind: ServiceAccount
+    name: collector
+roleRef:
+  kind: Role
+  name: collector-praxis-logs
+  apiGroup: rbac.authorization.k8s.io

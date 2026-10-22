@@ -138,6 +138,148 @@ an in-place escalation lever that switches quality without switching models.
    model that drops tool calls. Verify with one tool-call curl per model
    before enabling the policy's tool-loop escalation.
 
+## Phase 2: the three-arm substrate comparison (Arm A/B/C on the SAME engine)
+
+### The arms (`deploy/85-phase2-llmisvc.yaml` reference + `deploy/90-phase2-arms.yaml` comparison fleet)
+
+Phase 2 compares KV-cache SUBSTRATES, holding everything else constant: all
+six comparison LLMISVCs run the SAME engine (vLLM 0.30 from the official
+kvcached pairing `ghcr.io/ovg-project/kvcached-vllm:latest` — the thin
+`Containerfile.kvcached` layer only adds OpenShift arbitrary-UID cache-dir
+fixes), same models, same MIG profiles, same revision pins.
+
+| Arm | LLMISVCs | Substrate | vLLM args / env |
+|---|---|---|---|
+| **A** (static per-slice cache) | `a-qwen3-06b` (mig-18gb), `a-qwen3-8b` (mig-35gb) | native vLLM prefix caching, kvcached OFF | `--enable-prefix-caching` |
+| **B** (elastic, no reuse) | `b-qwen3-06b`, `b-qwen3-8b` | kvcached ON, APC OFF | `ENABLE_KVCACHED=true` `KVCACHED_AUTOPATCH=1` `--no-enable-prefix-caching`, NO `--gpu-memory-utilization` (kvcached manages memory) |
+| **C** (elastic + bounded APC) | `c-qwen3-06b`, `c-qwen3-8b` | kvcached ON, APC ON | `ENABLE_KVCACHED=true` `KVCACHED_AUTOPATCH=1` `--enable-prefix-caching` |
+
+Plus the RHOAI-production reference: the original `qwen3-06b`/`qwen3-8b`
+LLMISVCs (`deploy/85-phase2-llmisvc.yaml`, rhaiis vLLM 0.13) stay live — the
+as-deployed MaaS-tier baseline, NOT the comparison control.
+
+kvcached notes (upstream-confirmed from ovg-project/kvcached):
+- kvcached requires vLLM ≥ 0.17 — the rhaiis 0.13 image is below the minimum,
+  hence the dedicated kvcached-vllm 0.30 image for all comparison arms.
+- **The kvcached image BAKES `ENABLE_KVCACHED=true KVCACHED_AUTOPATCH=1
+  KVCACHED_IPC_NAME=VLLM` as env defaults** — Arm A sets
+  `ENABLE_KVCACHED=false` + `KVCACHED_AUTOPATCH=0` explicitly or it inherits
+  kvcached and the comparison is confounded (k8s container env ADDS to image
+  env; absence means inheritance). Image size 8.75 GB compressed (38 layers).
+- Activation: `ENABLE_KVCACHED=true` + `KVCACHED_AUTOPATCH=1` → the
+  `kvcached_autopatch.pth` hook patches vLLM at import (wrapt `when_imported`).
+  Serve-time signature in the pod logs:
+  `[kvcached][INFO] Applying 16 patches for vllm ... Successfully patched vllm`.
+- `--no-enable-prefix-caching` is the documented disable; with kvcached on,
+  DROP `--gpu-memory-utilization` — kvcached manages memory automatically.
+- kvcached v0.1.6 SUPPORTS APC with a configurable memory bound (Arm C's
+  differentiator; the bound is NOT a native vLLM feature).
+
+**Cluster mechanics (all learned live):**
+
+- KServe renders `--served-model-name` from the LLMInferenceService NAME —
+  the arm LLMISVCs serve `a-qwen3-06b`/`b-qwen3-06b`/... (and the full
+  `publishers/<ns>/models/<llmisvc-name>` path). The praxis `llm_d_sc` route
+  maps must splice the arm-prefixed name into the body, NOT the bare
+  `qwen3-06b` — a bare body model gets vLLM 404
+  `{"error":"The model \`qwen3-8b\` does not exist."}`.
+- praxis `base_path: /v1` prepends on the upstream leg — clients call the
+  BARE `/chat/completions` on the arm ports; a client `/v1/chat/completions`
+  doubles the prefix and FastAPI answers `{"detail":"Not Found"}`.
+- LLMISVC pods land in the `default` Kueue clusterqueue by default, which has
+  ZERO mig/gpu quota → SchedulingGated forever. The fix: the
+  `kueue.x-k8s.io/queue-name: unreserved` label on the LLMISVC metadata PLUS
+  the ODH annotations `opendatahub.io/hardware-profile-name` AND
+  `opendatahub.io/hardware-profile-namespace: redhat-ods-applications` (the
+  odh-model-controller webhook validates the pair and DENIES the apply
+  otherwise). The `unreserved` clusterqueue admits against its cohort's free
+  MIG capacity — the booking panel's unreserved slots, no reservation needed.
+- KServe's controller propagates the queue label into the Deployment's pod
+  template ONLY at Deployment creation — a later LLMISVC label edit does NOT
+  roll it; delete the kserve Deployment so the controller recreates it.
+- The KServe workload serves vLLM over **HTTPS** on :8000 with per-pod
+  self-signed certs — the praxis cluster needs `tls.verify: false` +
+  `insecure_options.allow_tls_no_verify`, and direct curls need an unverified
+  context.
+- The RHEL AI vLLM image does not know `--default-chat-template-kwargs`
+  (newer-vLLM flag) — thinking stays client-controlled via
+  `chat_template_kwargs` per request.
+- The response's `usage.prompt_tokens_details.cached_tokens` stays null in
+  this vLLM build even on hits — the ENGINE's
+  `vllm:prefix_cache_{queries,hits}_total` metrics on the workload's :8000
+  are the authoritative cache-hit measure.
+
+### (Retired) sardeenz Arm B
+
+The original Arm B — one sardeenz pod on a 3g.71gb slice with both models
+resident (`hack/deploy-sardeenz.sh` / `hack/patch-sardeenz.py`, kept as
+reference) — is RETIRED: sardeenz cannot detect GPUs on a MIG-partitioned
+node (the parent GPU's NVML `device.getStatus()` returns code 4
+NOT_SUPPORTED under MIG, and `@rh-ai-bu/ts-nvml` exposes no MIG device API).
+The kvcached MECHANISM lives on in the comparison fleet above.
+
+### The triple-listener phase-2 config (`deploy/config/praxis-config-phase2.yaml`)
+
+ONE praxis, one port per substrate arm:
+
+```
+              ┌─ listener :8080 ─ chain A ─→ a-qwen3-06b, a-qwen3-8b   (native APC, static)
+prompt ───────┤  listener :8081 ─ chain B ─→ b-qwen3-06b, b-qwen3-8b   (kvcached, no APC)
+              └─ listener :8082 ─ chain C ─→ c-qwen3-06b, c-qwen3-8b   (kvcached + APC)
+```
+
+- Cluster names carry the arm prefix (`a-`/`b-`/`c-`), so the access log's
+  `cluster` field shows which arm served each turn; each arm's chain routes
+  per label exactly like the phase-2 map (SIMPLE/MEDIUM → 0.6b,
+  COMPLEX/REASONING → 8b) — per-model LLMISVC endpoints on every arm
+- The SAME conversation replayed through all three ports is the comparison;
+  the substrate is the only difference
+- praxis /ready goes 503 while ANY listener's clusters have zero healthy
+  endpoints — deploy the LLMISVCs first, roll praxis after
+
+The collector groups by (conversation fingerprint, arm): the same conversation
+through the three arms renders as three side-by-side lanes in the flow
+graphic (arm badges + per-arm colors).
+
+
+
+`collector/` is a zero-dependency Python service (stdlib only, ubi-minimal +
+python3 image) deployed as `collector` in the same namespace (60/65/70/75
+manifests). It turns the routing chain's per-request decisions into live
+state:
+
+- **Ingestion**: follows the praxis pod's access_log through the in-cluster
+  K8s API (`pods/log get` via the collector ServiceAccount — deliberately the
+  only RBAC the observer needs), parsing each record's decision (the record
+  JSON is anchored on its first key `client_ip`; the rest of the line is
+  ANSI-decorated). A CloudEvents receiver (`POST /events`) is built in for
+  the later flip: when the praxis image gains the off-by-default
+  `cloud-events-filter` feature and the config adds a `cloud_events` filter
+  (`on: response_complete`, `metadata_fields: [llm_d_sc.*]`,
+  `destination: http://collector:8080/events`), that POST feed becomes the
+  primary input and the log tail retires (`COLLECTOR_LOG_FOLLOW=0`).
+- **Sessions**: turns group by the client-supplied `x-session-id` request
+  header (the access-log config carries it via a `request_header.x-session-id`
+  token — clients send it, praxis forwards it, the record includes it). The
+  opencode provider and the demo send it; curl smoke tests fall back to the
+  user-agent token.
+- **Surface** (route: `collector-user-mhepburn.apps.ocp.cloud.rhai-tmm.dev`):
+  - `/` — the flow graphic: one lane per session, one node per routed turn,
+    colored by tier (SIMPLE green / MEDIUM amber / COMPLEX red / REASONING
+    purple), node size by score, hover for model+score+latency; live stats
+    sidebar (decisions, per-tier counts, models served, classify p50/p95).
+  - `/snapshot` — full JSON state · `/events?since=N` — incremental feed.
+  - `/metrics` — Prometheus text: `router_decisions_total{label}`,
+    `router_model_selections_total{model}`, `router_upstream_status_total`,
+    `router_classify_latency_seconds` + `router_request_duration_seconds`
+    histograms, session/record counters.
+- **Prometheus**: 80-collector-servicemonitor.yaml ships the ServiceMonitor
+  but is deliberately NOT in kustomization resources — UWM only watches
+  namespaces labelled `openshift.io/cluster-monitoring=true`, and
+  user-mhepburn is a pre-existing user sandbox (labelling it is a GitOps
+  mutation outside this repo). Until the label lands, `/metrics` is verifiable
+  directly and the flow graphic is the live view.
+
 ## Smoke test plan
 
 Baseline (verified direct against MaaS, replicate through praxis):
@@ -247,5 +389,13 @@ deploy/
   kustomization.yaml             ties it together (disableNameSuffixHash, Secret excluded)
 Containerfile.praxis             multi-stage build; clones praxis v0.7.5, wires the
                                  filter crate, [patch] unification, --validate gate
+Containerfile.kvcached           thin layer FROM the official kvcached-vllm 0.30 image;
+                                 OpenShift arbitrary-UID cache-dir fixes only
+deploy/85-phase2-llmisvc.yaml    the RHOAI-reference pair (qwen3-06b/8b, rhaiis vLLM)
+deploy/90-phase2-arms.yaml       the three-arm comparison fleet (a-/b-/c- × 0.6b/8b,
+                                 kvcached image, ENABLE_KVCACHED per arm)
+deploy/config/praxis-config-phase2.yaml  the triple-listener arm config (:8080/:8081/:8082)
 hack/stage-build-context.sh      assembles the binary-build context
+hack/undeploy-sardeenz.sh        name-based sardeenz teardown (the arm is retired)
+hack/deploy-sardeenz.sh          (retired, kept as reference) the original Arm B
 ```

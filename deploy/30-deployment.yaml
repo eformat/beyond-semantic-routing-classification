@@ -93,6 +93,13 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            # PHASE 2: the Arm B + Arm C listeners (the kvcached substrates).
+            - name: http-arm-b
+              containerPort: 8081
+              protocol: TCP
+            - name: http-arm-c
+              containerPort: 8082
+              protocol: TCP
             - name: admin
               containerPort: 9901
               protocol: TCP

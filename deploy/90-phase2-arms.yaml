@@ -1,0 +1,361 @@
+# The phase-2 three-arm substrate comparison: SIX LLMInferenceServices on the
+# kvcached image (SAME engine everywhere — vLLM 0.30 from the official
+# kvcached pairing — so the caching semantics + memory management are the ONLY
+# experimental variables).
+#
+#   Arm A (a-*): native prefix caching, kvcached OFF   → static per-slice cache
+#   Arm B (b-*): kvcached ON, --no-enable-prefix-caching → elastic, no reuse
+#   Arm C (c-*): kvcached ON, --enable-prefix-caching    → elastic + bounded APC
+#
+# Per model: qwen3-0.6b on mig-18gb, qwen3-8b on mig-35gb (the same profiles
+# as the RHOAI-reference LLMISVCs in 85-phase2-llmisvc.yaml, which stay live
+# as the as-deployed MaaS-tier reference, NOT the comparison control).
+#
+# kvcached notes (upstream-confirmed):
+#   - ENABLE_KVCACHED=true + KVCACHED_AUTOPATCH=1 activate the autopatch (the
+#     .pth hook patches vLLM at import; serve-time signature: "[kvcached][INFO]
+#     Applying 16 patches for vllm ... Successfully patched vllm").
+#   - Arm B/C DROP --gpu-memory-utilization: "When kvcached is enabled, there
+#     is NO need to set memory utilization limit as kvcached will
+#     automatically manage the memory."
+#   - --no-enable-prefix-caching is the documented way to disable prefix
+#     caching under kvcached.
+#   - Arm A keeps the native vLLM APC (kvcached OFF) — the same engine, the
+#     static substrate.
+#
+# Revision pins (the models are frozen since 2025-07-26): 0.6B @ c1899de2,
+# 8B @ b968826d.
+#
+# The in-cluster endpoints the praxis phase-2 config points at:
+#   <name>-kserve-workload-svc:8000 (HTTPS, per-pod self-signed KServe certs).
+# ---------------------------------------------------------------------------
+# Common template shape (rendered per arm below): hf:// model URIs,
+# unreserved Kueue queue + the ODH hardware-profile annotations (the
+# odh-model-controller webhook validates the pair and injects the queue),
+# vllm-cuda-compatible contract (the controller renders the full vllm serve
+# command; VLLM_ADDITIONAL_ARGS flows through).
+
+# ----------------------------- ARM A ---------------------------------------
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: a-qwen3-06b
+  labels:
+    app.kubernetes.io/name: a-qwen3-06b
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    kueue.x-k8s.io/queue-name: unreserved
+  annotations:
+    opendatahub.io/hardware-profile-name: unreserved-mig-18gb
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+spec:
+  model:
+    name: a-qwen3-06b
+    uri: hf://Qwen/Qwen3-0.6B
+  replicas: 1
+  router:
+    gateway: {}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: quay.io/eformat/beyond-routing-kvcached-vllm:latest
+        env:
+          # The kvcached image bakes ENABLE_KVCACHED=true + KVCACHED_AUTOPATCH=1
+          # as env defaults — Arm A must EXPLICITLY disable both or it inherits
+          # kvcached and the A/B/C comparison is confounded.
+          - name: ENABLE_KVCACHED
+            value: "false"
+          - name: KVCACHED_AUTOPATCH
+            value: "0"
+          - name: VLLM_ADDITIONAL_ARGS
+            value: >-
+              --max-model-len=32768
+              --enable-force-include-usage
+              --enable-prefix-caching
+              --enable-auto-tool-choice
+              --tool-call-parser=hermes
+              --revision=c1899de289a04d12100db370d81485cdf75e47ca
+        resources:
+          limits:
+            cpu: "2"
+            memory: 12Gi
+            nvidia.com/mig-1g.18gb: "1"
+          requests:
+            cpu: "2"
+            memory: 12Gi
+            nvidia.com/mig-1g.18gb: "1"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: a-qwen3-8b
+  labels:
+    app.kubernetes.io/name: a-qwen3-8b
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    kueue.x-k8s.io/queue-name: unreserved
+  annotations:
+    opendatahub.io/hardware-profile-name: unreserved-mig-35gb
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+spec:
+  model:
+    name: a-qwen3-8b
+    uri: hf://Qwen/Qwen3-8B
+  replicas: 1
+  router:
+    gateway: {}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: quay.io/eformat/beyond-routing-kvcached-vllm:latest
+        env:
+          # Arm A: explicitly kvcached OFF (the image bakes ENABLE_KVCACHED=true).
+          - name: ENABLE_KVCACHED
+            value: "false"
+          - name: KVCACHED_AUTOPATCH
+            value: "0"
+          - name: VLLM_ADDITIONAL_ARGS
+            value: >-
+              --max-model-len=32768
+              --enable-force-include-usage
+              --enable-prefix-caching
+              --enable-auto-tool-choice
+              --tool-call-parser=hermes
+              --revision=b968826d9c46dd6066d109eabc6255188de91218
+        resources:
+          limits:
+            cpu: "4"
+            memory: 32Gi
+            nvidia.com/mig-2g.35gb: "1"
+          requests:
+            cpu: "4"
+            memory: 32Gi
+            nvidia.com/mig-2g.35gb: "1"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+---
+# ----------------------------- ARM B ---------------------------------------
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: b-qwen3-06b
+  labels:
+    app.kubernetes.io/name: b-qwen3-06b
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    kueue.x-k8s.io/queue-name: unreserved
+  annotations:
+    opendatahub.io/hardware-profile-name: unreserved-mig-18gb
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+spec:
+  model:
+    name: b-qwen3-06b
+    uri: hf://Qwen/Qwen3-0.6B
+  replicas: 1
+  router:
+    gateway: {}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: quay.io/eformat/beyond-routing-kvcached-vllm:latest
+        env:
+          - name: VLLM_ADDITIONAL_ARGS
+            value: >-
+              --max-model-len=32768
+              --enable-force-include-usage
+              --no-enable-prefix-caching
+              --enable-auto-tool-choice
+              --tool-call-parser=hermes
+              --revision=c1899de289a04d12100db370d81485cdf75e47ca
+          - name: ENABLE_KVCACHED
+            value: "true"
+          - name: KVCACHED_AUTOPATCH
+            value: "1"
+        resources:
+          limits:
+            cpu: "2"
+            memory: 12Gi
+            nvidia.com/mig-1g.18gb: "1"
+          requests:
+            cpu: "2"
+            memory: 12Gi
+            nvidia.com/mig-1g.18gb: "1"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: b-qwen3-8b
+  labels:
+    app.kubernetes.io/name: b-qwen3-8b
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    kueue.x-k8s.io/queue-name: unreserved
+  annotations:
+    opendatahub.io/hardware-profile-name: unreserved-mig-35gb
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+spec:
+  model:
+    name: b-qwen3-8b
+    uri: hf://Qwen/Qwen3-8B
+  replicas: 1
+  router:
+    gateway: {}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: quay.io/eformat/beyond-routing-kvcached-vllm:latest
+        env:
+          - name: VLLM_ADDITIONAL_ARGS
+            value: >-
+              --max-model-len=32768
+              --enable-force-include-usage
+              --no-enable-prefix-caching
+              --enable-auto-tool-choice
+              --tool-call-parser=hermes
+              --revision=b968826d9c46dd6066d109eabc6255188de91218
+          - name: ENABLE_KVCACHED
+            value: "true"
+          - name: KVCACHED_AUTOPATCH
+            value: "1"
+        resources:
+          limits:
+            cpu: "4"
+            memory: 32Gi
+            nvidia.com/mig-2g.35gb: "1"
+          requests:
+            cpu: "4"
+            memory: 32Gi
+            nvidia.com/mig-2g.35gb: "1"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+---
+# ----------------------------- ARM C ---------------------------------------
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: c-qwen3-06b
+  labels:
+    app.kubernetes.io/name: c-qwen3-06b
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    kueue.x-k8s.io/queue-name: unreserved
+  annotations:
+    opendatahub.io/hardware-profile-name: unreserved-mig-18gb
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+spec:
+  model:
+    name: c-qwen3-06b
+    uri: hf://Qwen/Qwen3-0.6B
+  replicas: 1
+  router:
+    gateway: {}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: quay.io/eformat/beyond-routing-kvcached-vllm:latest
+        env:
+          - name: VLLM_ADDITIONAL_ARGS
+            value: >-
+              --max-model-len=32768
+              --enable-force-include-usage
+              --enable-prefix-caching
+              --enable-auto-tool-choice
+              --tool-call-parser=hermes
+              --revision=c1899de289a04d12100db370d81485cdf75e47ca
+          - name: ENABLE_KVCACHED
+            value: "true"
+          - name: KVCACHED_AUTOPATCH
+            value: "1"
+        resources:
+          limits:
+            cpu: "2"
+            memory: 12Gi
+            nvidia.com/mig-1g.18gb: "1"
+          requests:
+            cpu: "2"
+            memory: 12Gi
+            nvidia.com/mig-1g.18gb: "1"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: c-qwen3-8b
+  labels:
+    app.kubernetes.io/name: c-qwen3-8b
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    kueue.x-k8s.io/queue-name: unreserved
+  annotations:
+    opendatahub.io/hardware-profile-name: unreserved-mig-35gb
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+spec:
+  model:
+    name: c-qwen3-8b
+    uri: hf://Qwen/Qwen3-8B
+  replicas: 1
+  router:
+    gateway: {}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: quay.io/eformat/beyond-routing-kvcached-vllm:latest
+        env:
+          - name: VLLM_ADDITIONAL_ARGS
+            value: >-
+              --max-model-len=32768
+              --enable-force-include-usage
+              --enable-prefix-caching
+              --enable-auto-tool-choice
+              --tool-call-parser=hermes
+              --revision=b968826d9c46dd6066d109eabc6255188de91218
+          - name: ENABLE_KVCACHED
+            value: "true"
+          - name: KVCACHED_AUTOPATCH
+            value: "1"
+        resources:
+          limits:
+            cpu: "4"
+            memory: 32Gi
+            nvidia.com/mig-2g.35gb: "1"
+          requests:
+            cpu: "4"
+            memory: 32Gi
+            nvidia.com/mig-2g.35gb: "1"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
