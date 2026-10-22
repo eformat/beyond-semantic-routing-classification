@@ -38,6 +38,9 @@ resources:
   # Phase 2 arm Routes: one external TLS Route per substrate arm (the laptop
   # picks the substrate by endpoint — praxis-arm-b/praxis-arm-c hosts).
   - 95-arm-routes.yaml
+  # ARM D: BOTH models on ONE MIG 3g.71gb slice, kvcached allocating the KV
+  # memory elastically (the elastic memory-SHARING thesis).
+  - 97-arm-d.yaml
   # Phase 2 three-arm substrate comparison: six LLMISVCs on the kvcached
   # image (a- = native APC, b- = kvcached no-APC, c- = kvcached + APC), all
   # on the SAME engine (vLLM 0.30).

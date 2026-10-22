@@ -1,0 +1,188 @@
+# ARM D — the elastic memory-SHARING experiment: BOTH models resident on ONE
+# MIG 3g.71gb slice, kvcached allocating the KV memory elastically between the
+# two engines (the original sardeenz design, now measured against the static
+# per-model partitioning of arms A/B/C).
+#
+# WHY an LLMInferenceService cannot express this: an LLMISVC serves one model
+# per workload. The elastic-sharing thesis needs TWO vLLM processes on the
+# SAME GPU slice sharing one memory pool through kvcached's VMM
+# (KVCACHED_IPC_NAME), so this is a plain Deployment with a launch script.
+#
+#   static partitioning (arms A/B/C): 18GB (0.6B) + 35GB (8B) = 53GB reserved
+#   elastic sharing (arm D):          ONE 71GB slice, memory on demand
+#
+# Both instances run the SAME engine + flags as arms A/B/C (vLLM 0.30 from the
+# kvcached image, prefix caching ON — reuse is the winning strategy, kvcached
+# manages the memory so NO --gpu-memory-utilization), differing only in port
+# and served-model-name. REASONING turns still escalate to the MaaS glm tier.
+#
+# The endpoints (plain HTTP — no KServe TLS, the praxis cluster needs no
+# verify:false): d-dual-vllm:8000 (0.6B) and d-dual-vllm:8001 (8B).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: d-launch
+  labels:
+    app.kubernetes.io/name: d-dual-vllm
+    app.kubernetes.io/part-of: beyond-semantic-routing
+data:
+  launch.sh: |
+    #!/bin/bash
+    # Arm D: two vLLM engines on ONE MIG slice, sharing the GPU memory pool
+    # through kvcached's VMM. Same engine + flags as arms A/B/C; kvcached
+    # manages the memory (NO --gpu-memory-utilization).
+    set -euo pipefail
+    export ENABLE_KVCACHED=true
+    export KVCACHED_AUTOPATCH=1
+    COMMON_ARGS="--max-model-len=32768 --enable-force-include-usage
+      --enable-prefix-caching --enable-auto-tool-choice --tool-call-parser=hermes
+      --reasoning-parser=qwen3"
+
+    echo "[d-launch] starting the 0.6B engine on :8000"
+    vllm serve /models/qwen3-0.6b \
+      --served-model-name d-qwen3-06b \
+      --port 8000 \
+      ${COMMON_ARGS} \
+      --revision c1899de289a04d12100db370d81485cdf75e47ca \
+      > /var/log/d-06b.log 2>&1 &
+    P1=$!
+
+    echo "[d-launch] starting the 8B engine on :8001"
+    vllm serve /models/qwen3-8b \
+      --served-model-name d-qwen3-8b \
+      --port 8001 \
+      ${COMMON_ARGS} \
+      --revision b968826d9c46dd6066d109eabc6255188de91218 \
+      > /var/log/d-8b.log 2>&1 &
+    P2=$!
+
+    echo "[d-launch] both engines launched (pids ${P1} ${P2}); waiting"
+    wait -n "$P1" "$P2"
+    echo "[d-launch] an engine exited — failing the pod"
+    exit 1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: d-model-cache
+  labels:
+    app.kubernetes.io/name: d-dual-vllm
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 40Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: d-dual-vllm
+  labels:
+    app.kubernetes.io/name: d-dual-vllm
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: d-dual-vllm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: d-dual-vllm
+        app.kubernetes.io/part-of: beyond-semantic-routing
+        kueue.x-k8s.io/queue-name: unreserved
+    spec:
+      initContainers:
+        # Both models into the PVC once (~18GB); restarts reuse the cache.
+        - name: model-fetch
+          image: quay.io/eformat/beyond-routing-kvcached-vllm:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              if [ -f /models/qwen3-0.6b/config.json ] && [ -f /models/qwen3-8b/config.json ]; then
+                echo "[model-fetch] both models already present"; exit 0
+              fi
+              echo "[model-fetch] downloading Qwen3-0.6B @ c1899de2"
+              python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-0.6B', revision='c1899de289a04d12100db370d81485cdf75e47ca', local_dir='/models/qwen3-0.6b')"
+              echo "[model-fetch] downloading Qwen3-8B @ b968826d"
+              python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-8B', revision='b968826d9c46dd6066d109eabc6255188de91218', local_dir='/models/qwen3-8b')"
+              echo "[model-fetch] done"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      containers:
+        - name: dual-vllm
+          image: quay.io/eformat/beyond-routing-kvcached-vllm:latest
+          command: ["/bin/bash", "/launch/launch.sh"]
+          ports:
+            - name: qwen3-06b
+              containerPort: 8000
+            - name: qwen3-8b
+              containerPort: 8001
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 60
+          # the 8B engine is slower to come up; a second probe on :8001
+          startupProbe:
+            httpGet: { path: /health, port: 8001 }
+            periodSeconds: 15
+            failureThreshold: 120
+          env:
+            - name: HF_HOME
+              value: /models/hf-home
+          resources:
+            limits:
+              cpu: "6"
+              memory: 40Gi
+              nvidia.com/mig-3g.71gb: "1"
+            requests:
+              cpu: "6"
+              memory: 40Gi
+              nvidia.com/mig-3g.71gb: "1"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: launch
+              mountPath: /launch
+            - name: logs
+              mountPath: /var/log
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: d-model-cache
+        - name: launch
+          configMap:
+            name: d-launch
+        - name: logs
+          emptyDir: {}
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+---
+# One Service, two named ports — the praxis clusters point at the same pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: d-dual-vllm
+  labels:
+    app.kubernetes.io/name: d-dual-vllm
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  selector:
+    app.kubernetes.io/name: d-dual-vllm
+  ports:
+    - name: qwen3-06b
+      port: 8000
+      targetPort: qwen3-06b
+      protocol: TCP
+    - name: qwen3-8b
+      port: 8001
+      targetPort: qwen3-8b
+      protocol: TCP
