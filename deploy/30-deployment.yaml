@@ -1,0 +1,157 @@
+# The Praxis proxy carrying the beyond-routing filter.
+#
+# Probes (from the v0.7.5 source and docs, not guessed): Praxis exposes a real
+# HTTP admin listener - GET /healthy (liveness: 200 once the server accepts
+# connections) and GET /ready (readiness: 503 when a cluster with active
+# health checks has zero healthy endpoints). Our config defines no
+# health_check blocks, so /ready cannot flap on upstream 401s.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: praxis
+  labels:
+    app.kubernetes.io/name: praxis
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: praxis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: praxis
+        app.kubernetes.io/part-of: beyond-semantic-routing
+    spec:
+      # No runAsUser / runAsGroup / fsGroup on purpose. OpenShift's restricted-v2
+      # SCC assigns an arbitrary UID from the namespace's range and GID 0; pinning
+      # a UID here would fight it. The image is built to work with any UID (group
+      # 0 ownership, g=u permissions).
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Praxis does not expand environment variables in its config file. The
+        # shipped config carries NO credential placeholder at all: the MaaS key
+        # is read from the MAAS_API_KEY environment variable by the
+        # credential_injection filter itself, so this render is a verbatim copy.
+        # The env var is wired here anyway so a future templated config variant
+        # needs no Deployment change.
+        - name: render-config
+          image: quay.io/eformat/praxis-beyond-routing:latest
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/render-config.sh"]
+          env:
+            - name: CONFIG_TEMPLATE
+              value: /config-template/praxis.yaml
+            - name: CONFIG_OUT
+              value: /etc/praxis/config.yaml
+            - name: MAAS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: maas-api-key
+                  key: key
+          volumeMounts:
+            - name: config-template
+              mountPath: /config-template
+              readOnly: true
+            - name: config-rendered
+              mountPath: /etc/praxis
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: praxis
+          image: quay.io/eformat/praxis-beyond-routing:latest
+          imagePullPolicy: Always
+          # Explicit rather than relying on the image ENTRYPOINT, which already
+          # carries the same flags: setting only `args` would append a second
+          # `-c` to the entrypoint's.
+          command: ["/usr/local/bin/praxis"]
+          args: ["-c", "/etc/praxis/config.yaml"]
+          env:
+            # Resolved by the credential_injection filter at construction time
+            # (config: env_var: MAAS_API_KEY). Wrapped in SecretString/Zeroizing
+            # by praxis, and never written to the rendered config file.
+            - name: MAAS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: maas-api-key
+                  key: key
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: admin
+              containerPort: 9901
+              protocol: TCP
+            # v0.7.5 moved /healthy, /ready and /metrics to this dedicated
+            # listener (admin.metrics_address); the probes target it.
+            - name: metrics
+              containerPort: 9902
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthy
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthy
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: config-rendered
+              mountPath: /etc/praxis
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Modest: this is a shared cluster, and the proxy is not the workload
+          # under test - the routing decision quality is.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: config-template
+          configMap:
+            name: praxis-config
+        # Memory-backed: keeps any future credential-bearing render off disk
+        # (the shipped config has no placeholder, but the volume is the proven
+        # pattern and costs 1Mi).
+        - name: config-rendered
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

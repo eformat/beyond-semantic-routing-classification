@@ -1,0 +1,204 @@
+# Praxis configuration for the beyond-semantic-routing POC: MaaS BODY-BASED
+# routing at ONE endpoint.
+#
+# This is the SOURCE OF TRUTH for the `praxis-config` ConfigMap and is also the
+# file the image build validates against (`praxis --validate`), so a config
+# that cannot start the proxy fails the build rather than the rollout.
+#
+# This file contains NO credential placeholder: the MaaS key is read from the
+# MAAS_API_KEY environment variable by the credential_injection filter itself
+# (resolved once at filter construction), so nothing here is ever substituted
+# and no credential can reach a rendered file on disk. render-config.sh copies
+# this file through verbatim.
+#
+# The chain (one filter per hop of the routing decision):
+#
+#   request_id -> access_log -> llm_d_sc -> json_body -> credential_injection
+#   -> load_balancer
+#
+# Model selection happens by REWRITING the request body `model` field to the
+# FULL internal MaaS model path (publishers/prelude-maas/models/<name>), not by
+# selecting a per-model cluster. All labels map to the SAME cluster below so
+# llm_d_sc's existing cluster-selection validation still passes; the actual
+# per-label decision is carried in filter_metadata and applied by json_body.
+#
+# ---------------------------------------------------------------------------
+# LIMITATION (verified against praxis v0.7.5 source): there is NO way to gate
+# a json_body filter on the llm_d_sc classification in v0.7.5.
+#   - Filter `conditions` (when/unless) only match the ORIGINAL downstream
+#     request (grpc/path/path_prefix/methods/headers/headers_present) or the
+#     LB-selected upstream; there is no filter-results or filter-metadata
+#     matcher, and request-phase conditions read the original request headers
+#     only - headers queued by earlier filters are applied after the whole
+#     filter phase, so `when: headers:` cannot see them either.
+#   - `branch_chains` can read filter results, but only the HOST filter's own
+#     results (a condition naming another filter is rejected at startup), and
+#     body-transforming filters are rejected inside branch chains outright.
+# The shipped mechanism instead: the json_body filter below replaces /model
+# with the filter_metadata key `llm_d_sc.model`, which the beyond-routing
+# filter (v2) must publish - the full MaaS path for the winning label. When
+# that key is absent (classifier unavailable, or the v2 filter does not publish
+# it yet), the replace is SKIPPED and the client's original model value passes
+# through unchanged: fail-open by design. See deploy/README.md.
+# ---------------------------------------------------------------------------
+
+# The admin listener carries the Kubernetes probes:
+#   GET /healthy  liveness  - 200 once the server accepts connections
+#   GET /ready    readiness - 503 if any cluster has zero healthy endpoints
+#   GET /metrics  prometheus
+#
+# PRAXIS v0.7.5 MOVED /healthy, /ready and /metrics to a DEDICATED
+# admin.metrics_address listener; admin.address is reserved for /api/*. The
+# probes therefore target the metrics port, not the admin port. A non-loopback
+# metrics bind only warns (no flag needed); admin.address keeps
+# allow_public_admin for its own non-loopback bind.
+#
+# Both must bind 0.0.0.0, not loopback, because the kubelet probes from outside
+# the container's network namespace. Praxis refuses a non-loopback admin bind
+# unless allow_public_admin is set, so that flag is required here rather than
+# optional. The admin and metrics ports are deliberately NOT exposed through
+# the Service or the Route.
+admin:
+  address: "0.0.0.0:9901"
+  metrics_address: "0.0.0.0:9902"
+  verbose: true
+
+insecure_options:
+  allow_public_admin: true
+
+listeners:
+  - name: http
+    address: "0.0.0.0:8080"
+    filter_chains: [ai-routing]
+
+filter_chains:
+  - name: ai-routing
+    filters:
+      # Sets x-request-id, which the llm_d_sc filter reuses as the
+      # ClassifyRequest request_id so a classification can be correlated with
+      # the access-log line for the same request.
+      - filter: request_id
+
+      # The llm_d_sc.* classification metadata (status, label, model, cluster,
+      # score, latency_us) surfaces in these access-log records. Praxis v0.7.5
+      # access_log renders filter metadata ONLY via explicit `metadata.<key>`
+      # field tokens (a v0.7.5 addition — the v0.5.2 access_log could not do
+      # this, which was the v1 PoC's finding F-4). `fields` REPLACES the default
+      # ten when present, so the defaults are repeated here and the metadata
+      # tokens appended. This is the primary live observability for the routing
+      # chain: one JSON record per request carrying the routing decision.
+      - filter: access_log
+        fields:
+          - method
+          - path
+          - client_ip
+          - status
+          - duration_ms
+          - cluster
+          - upstream
+          - request_id
+          - request_body_bytes
+          - response_body_bytes
+          - metadata.llm_d_sc.status
+          - metadata.llm_d_sc.label
+          - metadata.llm_d_sc.model
+          - metadata.llm_d_sc.score
+          - metadata.llm_d_sc.cluster
+          - metadata.llm_d_sc.latency_us
+
+      # The classifier. Routes every label to the SAME cluster so the existing
+      # cluster-selection machinery validates and /ready reflects endpoint
+      # health; the per-label decision is published as filter_metadata
+      # (llm_d_sc.label and llm_d_sc.model) and applied to the body by the
+      # json_body filter below.
+      #
+      # default_cluster is the fail-open target: if the classifier is
+      # unavailable, unclassified traffic still reaches MaaS with the client's
+      # original model value (no rewrite, since no model metadata is published).
+      #
+      # The model paths are the FULL internal MaaS paths body-based routing
+      # expects (publishers/prelude-maas/models/<name>) — these become the
+      # llm_d_sc.model metadata value json_body splices into /model. Tier
+      # mapping is the STARTING point; the tier x model matrix run MEASURES the
+      # real table and this map is then replaced with measured values.
+      - filter: llm_d_sc
+        endpoint: "llm-d-sc:50051"
+        default_cluster: maas
+        default_model: publishers/prelude-maas/models/llama-32-3b
+        timeout_ms: 100
+        routes:
+          - {label: SIMPLE,    cluster: maas, model: publishers/prelude-maas/models/llama-32-3b}
+          - {label: MEDIUM,    cluster: maas, model: publishers/prelude-maas/models/nemotron-cascade-2-30b}
+          - {label: COMPLEX,   cluster: maas, model: publishers/prelude-maas/models/qwen38-27b}
+          - {label: REASONING, cluster: maas, model: publishers/prelude-maas/models/glm-53-flash}
+
+      # Body-based model selection. Replaces /model with the value of the
+      # `llm_d_sc.model` filter_metadata key (written by the beyond-routing
+      # filter from the winning label; value injected as a JSON string).
+      #
+      # Semantics (v0.7.5 json_body): a replace whose metadata source is
+      # missing skips that operation, so requests with no classification pass
+      # through with the client's original model; a client that omitted /model
+      # entirely also passes through (replace targets must be present).
+      #
+      # max_body_bytes: 10 MiB, matched to long multi-turn agent conversations
+      # (peak heap is ~2x this per concurrent request on the mutating walk).
+      # on_invalid: non-JSON bodies (probes, non-chat traffic) pass through
+      # unchanged rather than being rejected.
+      - filter: json_body
+        content_types:
+          - application/json
+        max_body_bytes: 10485760
+        on_invalid: continue
+        request_replace:
+          - pointer: /model
+            metadata: llm_d_sc.model
+
+      # Injects the MaaS bearer token ONLY on requests routed to the `maas`
+      # cluster. Reads the value from the MAAS_API_KEY environment variable
+      # (supplied by secretKeyRef) at filter construction, so no credential
+      # appears in this file, in the ConfigMap, or on disk. Must sit AFTER
+      # llm_d_sc, which is what sets the selected cluster.
+      - filter: credential_injection
+        clusters:
+          - name: maas
+            header: "Authorization"
+            header_prefix: "Bearer "
+            env_var: MAAS_API_KEY
+
+      # The single upstream: the shared MaaS gateway, reached over the public
+      # Route hostname from inside the cluster. One endpoint for ALL models -
+      # the model was already rewritten into the body above.
+      #
+      # - tls: presence alone enables upstream TLS; verify defaults to true,
+      #   and the gateway presents the platform Let's Encrypt *.apps wildcard
+      #   that the system CA pool trusts. sni defaults to the authority host.
+      # - http.authority: rewrites the upstream Host header to the MaaS host -
+      #   the downstream Host is this proxy's Route hostname, which the MaaS
+      #   gateway would not route.
+      # - http.base_path: /v1 is prepended to the request path on the upstream
+      #   leg only (route matching and access logs still see the client path).
+      #   Clients therefore call https://<praxis-route>/chat/completions; a
+      #   client that already sends /v1/... would get a doubled prefix.
+      # - trusted_private_endpoints: the Route hostname may resolve to an RFC
+      #   1918 address from inside the cluster (the router/ELB). Praxis refuses
+      #   private resolutions unless the hostname is allow-listed here; with a
+      #   public resolution the entry is simply inert.
+      - filter: load_balancer
+        clusters:
+          - name: maas
+            endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev:443"
+            http:
+              authority: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              base_path: /v1
+            tls:
+              sni: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              verify: true
+            trusted_private_endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev"
+            # The upstream is across the cluster router: bound the TCP and
+            # TCP+TLS handshakes so a stalled gateway fails fast to the
+            # fail-open path instead of hanging the request.
+            connection_timeout_ms: 5000
+            total_connection_timeout_ms: 10000

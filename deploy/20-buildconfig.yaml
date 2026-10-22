@@ -1,0 +1,56 @@
+# In-cluster image build for the Praxis proxy carrying the beyond-routing
+# filter.
+#
+# Binary source, not Git: the build context is a directory streamed from the
+# laptop by `oc start-build --from-dir`, assembled by
+# hack/stage-build-context.sh. The context holds the filter crate (router/)
+# plus the config and render script; the praxis workspace itself is cloned
+# inside the Containerfile at the exact tag v0.7.5, so the build does not
+# depend on the state of any local checkout.
+#
+# The build MUST happen in-cluster: the nodes are amd64 and the dev laptop is
+# arm64, so a locally built image would not run on the cluster.
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: praxis-beyond-routing
+  labels:
+    app.kubernetes.io/name: praxis
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  # Serial: this build is heavy (pingora + the whole praxis tree, cloned at
+  # v0.7.5). Two of them at once on a shared cluster node is not neighbourly.
+  runPolicy: Serial
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      # Relative to the build context root, where stage-build-context.sh puts it.
+      dockerfilePath: Containerfile.praxis
+      env:
+        - name: BUILD_LOGLEVEL
+          value: "2"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: praxis-beyond-routing:latest
+  # Generous, and matched to the precedent already running on this cluster
+  # (the llm-d-sc BuildConfig requests 4 CPU / 8Gi).
+  #
+  # If the build is OOM-killed, lower codegen parallelism by setting
+  # CARGO_BUILD_JOBS (a build ARG in Containerfile.praxis) rather than
+  # switching to a debug build: every latency figure depends on --release.
+  resources:
+    requests:
+      cpu: "4"
+      memory: 8Gi
+    limits:
+      cpu: "8"
+      memory: 16Gi
+  # A cold Rust build of this dependency graph is slow. Two hours is headroom,
+  # not an expectation.
+  completionDeadlineSeconds: 7200
+  successfulBuildsHistoryLimit: 3
+  failedBuildsHistoryLimit: 3

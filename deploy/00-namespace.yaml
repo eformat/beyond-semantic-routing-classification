@@ -1,0 +1,10 @@
+# The blast radius of this POC. Everything new lives here, so the whole thing
+# can be removed with a single `oc delete namespace beyond-routing` and cannot
+# touch the shared MaaS gateway or any other tenant's resources.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: beyond-routing
+  labels:
+    app.kubernetes.io/part-of: beyond-semantic-routing
+    app.kubernetes.io/managed-by: beyond-routing-filter

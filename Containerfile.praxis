@@ -1,0 +1,202 @@
+# Containerfile.praxis - Praxis proxy v0.7.5 built WITH the beyond-routing
+# filter crate.
+#
+# Modelled on the llm-d-sc-praxis-filter PoC's Containerfile.praxis, which is
+# itself modelled on ~/praxis/Containerfile. The same two deliberate
+# divergences apply, both forced by the build environment:
+#
+#   1. No `# syntax=docker/dockerfile:1` directive and no `RUN --mount=type=cache`.
+#      Those are BuildKit features. This image is built by an OpenShift Docker-
+#      strategy BuildConfig, which uses buildah. A binary build starts from a
+#      fresh pod every time, so the cache mounts would buy nothing even where
+#      they parse.
+#   2. No dependency-stub pre-build layer. That trick exists to keep a *cached*
+#      dependency layer warm across rebuilds. With no cross-build cache it only
+#      adds a redundant compile of the dependency graph.
+#
+# Divergence from the source PoC: the praxis workspace is CLONED here at the
+# exact tag v0.7.5 rather than staged from a local checkout, so the build does
+# not depend on the state of anyone's local tree. (The build pod needs network
+# for crates.io regardless, so the clone adds no new requirement.)
+#
+# Build context layout (produced by hack/stage-build-context.sh):
+#   ./router/                        the beyond-routing filter crate
+#   ./deploy/config/praxis-config.yaml  the config the validate gate checks
+#   ./deploy/runtime/render-config.sh   the initContainer render script
+#   ./Containerfile.praxis           this file
+#
+# Build:
+#   CTX="$(hack/stage-build-context.sh)"
+#   oc start-build praxis-beyond-routing -n beyond-routing --from-dir="$CTX" --follow
+
+# ------------------------------------------------------------------------------
+# Stage 1: Build
+# ------------------------------------------------------------------------------
+
+FROM rust:1.96-alpine AS builder
+
+# Static OpenSSL: the runtime stage is a bare alpine with no openssl runtime.
+ENV OPENSSL_STATIC=1
+# prost-build ships a vendored protoc built against glibc, which cannot execute
+# on musl. Point it at alpine's native protoc instead.
+ENV PROTOC=/usr/bin/protoc
+
+# git: for the praxis clone below.
+RUN apk add --no-cache \
+      git \
+      musl-dev \
+      openssl-dev \
+      openssl-libs-static \
+      pkgconf \
+      cmake \
+      make \
+      g++ \
+      perl \
+      protobuf \
+      protobuf-dev
+
+WORKDIR /src
+
+# Exact tag, shallow. The source repo's local checkout was v0.7.5 plus a few
+# commits; the build must validate the tag the router crate pins.
+RUN git clone --branch v0.7.5 --depth 1 \
+      https://github.com/praxis-proxy/praxis /src/praxis
+
+COPY router/                              /src/router/
+COPY deploy/config/praxis-config.yaml     /src/deploy-config/praxis-config.yaml
+
+# --- Wire the filter crate into the Praxis workspace --------------------------
+#
+# Two edits, both IDEMPOTENT (an existing entry is left strictly alone; a
+# duplicate would be a hard cargo error):
+#
+# 1. server/Cargo.toml: ONE line adding the filter crate as a dependency. The
+#    server's build.rs then discovers the crate through `cargo metadata` by its
+#    [package.metadata.praxis-filters] marker and registers it at startup.
+#
+# 2. workspace-root Cargo.toml: a [patch] section unifying the router crate's
+#    GIT dependencies (praxis-core / praxis-filter, pinned to git tag v0.7.5)
+#    with the workspace's own copies of the same crates. Without it, cargo
+#    builds TWO instances of praxis_proxy_core / praxis_filter - the git ones
+#    for the router crate and the local workspace ones for the server - and
+#    the build dies with E0308 ("multiple different versions of crate
+#    praxis_core in the dependency graph") the moment a filter trait object
+#    crosses the boundary. The patch redirects both to the same local
+#    checkout: one instance, shared types.
+#
+# The awk insert (rather than sed -i 's/.../\n.../'): a newline in a sed
+# replacement is a GNU extension that busybox sed handles inconsistently,
+# whereas this awk is byte-identical under busybox, mawk and gawk.
+RUN set -e; \
+    if grep -q '^beyond-routing-filter[[:space:]]*=' /src/praxis/crates/server/Cargo.toml; then \
+      echo "server/Cargo.toml is already wired; leaving it untouched"; \
+    else \
+      awk '/^\[dependencies\]$/ { \
+             print; \
+             print "beyond-routing-filter = { path = \"/src/router\" }"; \
+             next \
+           } \
+           { print }' \
+        /src/praxis/crates/server/Cargo.toml > /tmp/server-Cargo.toml; \
+      mv /tmp/server-Cargo.toml /src/praxis/crates/server/Cargo.toml; \
+      echo "wired the beyond-routing-filter crate into server/Cargo.toml"; \
+    fi; \
+    if grep -q '^\[patch\."https://github.com/praxis-proxy/praxis"\]' /src/praxis/Cargo.toml; then \
+      echo "workspace root already patched; leaving it untouched"; \
+    else \
+      printf '\n[patch."https://github.com/praxis-proxy/praxis"]\npraxis-proxy-core = { path = "crates/core" }\npraxis-proxy-filter = { path = "crates/filter" }\n' >> /src/praxis/Cargo.toml; \
+      echo "added the [patch] unification to the workspace root Cargo.toml"; \
+    fi
+
+# Fail loudly if the wiring is missing or duplicated, or if the filter crate is
+# not what we expect. A silently unwired build would produce a perfectly
+# healthy Praxis binary with no llm_d_sc filter in it, and the failure would
+# only surface later as an inscrutable config error at pod startup.
+RUN set -e; \
+    n=$(grep -c '^beyond-routing-filter[[:space:]]*=' /src/praxis/crates/server/Cargo.toml || true); \
+    if [ "$n" -ne 1 ]; then \
+      echo "FATAL: expected exactly 1 filter dependency in server/Cargo.toml, found $n" >&2; exit 1; \
+    fi; \
+    grep -q '^\[patch\."https://github.com/praxis-proxy/praxis"\]' /src/praxis/Cargo.toml \
+      || { echo "FATAL: [patch] unification missing from the workspace root Cargo.toml" >&2; exit 1; }; \
+    grep -q '^name = "beyond-routing-filter"' /src/router/Cargo.toml \
+      || { echo "FATAL: /src/router is not the beyond-routing-filter crate (missing Cargo.toml name)" >&2; exit 1; }; \
+    grep -q 'praxis-filters' /src/router/Cargo.toml \
+      || { echo "FATAL: router crate has no [package.metadata.praxis-filters] marker; the server build would not register it" >&2; exit 1; }; \
+    echo "OK: filter crate wired and workspace patched exactly once"
+
+WORKDIR /src/praxis
+
+# Lower this if the build pod is OOM-killed. Never switch to a debug build to
+# save memory: every latency figure depends on --release. An ARG with no
+# default expands to the EMPTY STRING when no --build-arg is passed, and
+# `CARGO_BUILD_JOBS=` is a hard cargo error ("Number of parallel jobs should
+# be `default` or a number"), not an ignored value. So the default is spelled
+# out. `default` means "one job per CPU"; lower it via --build-arg if the
+# builder pod gets OOM-killed during codegen.
+ARG CARGO_BUILD_JOBS=default
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
+RUN cargo build --release -p praxis-proxy \
+ && cp target/release/praxis /usr/local/bin/praxis
+
+# Prove the filter is actually registered, at build time rather than at
+# rollout. `--validate` runs the real startup path (filter factory
+# construction, chain expansion, ordering and cluster-alignment checks) and
+# exits. If `llm_d_sc` were missing from the registry, or if its config schema
+# disagreed with the config we are about to ship, this fails the build instead
+# of CrashLoopBackOff-ing later. It performs no DNS and no network I/O:
+# cluster endpoints are stored as strings and resolved per-connection, and the
+# filter's gRPC channel is connect_lazy.
+#
+# MAAS_API_KEY build-time placeholder: `credential_injection` validates at
+# filter construction that its env_var is set, and the build container has no
+# credential (correctly). Runtime gets the real key from the Secret via
+# secretKeyRef, so this value exists ONLY inside this validate run — it is a
+# placeholder, not a credential, and never becomes an image ENV.
+RUN MAAS_API_KEY=build-time-placeholder /usr/local/bin/praxis --validate \
+      -c /src/deploy-config/praxis-config.yaml \
+ && echo "OK: llm_d_sc filter is registered and the shipped body-routing config validates"
+
+# ------------------------------------------------------------------------------
+# Stage 2: Runtime
+# ------------------------------------------------------------------------------
+
+FROM alpine:3.23
+
+LABEL org.opencontainers.image.title="praxis-beyond-routing" \
+      org.opencontainers.image.description="Praxis proxy with the beyond-routing semantic-classification body-routing filter" \
+      org.opencontainers.image.licenses="MIT"
+
+# OpenShift runs containers with an arbitrary, per-namespace UID and GID 0. So:
+#   - nothing may assume uid 0 or uid 1001 specifically;
+#   - every path the process must read or write is owned by group 0 and made
+#     group-writable (`chmod g=u`), because GID 0 is the one identity guaranteed
+#     to be present.
+# /etc/praxis is where the initContainer writes the rendered config (a memory
+# emptyDir at runtime); /config-template is where the ConfigMap is mounted.
+RUN apk add --no-cache ca-certificates \
+ && mkdir -p /etc/praxis /config-template \
+ && chgrp -R 0 /etc/praxis /config-template \
+ && chmod -R g=u /etc/praxis /config-template
+
+COPY --from=builder --chown=root:root --chmod=0555 \
+     /usr/local/bin/praxis /usr/local/bin/praxis
+
+# Renders the ConfigMap template into /etc/praxis/config.yaml, substituting any
+# ${MAAS_API_KEY} token from the environment (a no-op verbatim copy for the
+# shipped config). Run as the initContainer's command.
+COPY --chown=root:root --chmod=0555 \
+     deploy/runtime/render-config.sh \
+     /usr/local/bin/render-config.sh
+
+# Numeric, and only a placeholder: OpenShift overrides it with the namespace's
+# assigned UID. Its real job is to guarantee the image never defaults to root.
+USER 1001
+
+WORKDIR /etc/praxis
+
+# 8080 data plane, 9901 admin (/healthy, /ready, /metrics).
+EXPOSE 8080 9901
+
+ENTRYPOINT ["/usr/local/bin/praxis", "-c", "/etc/praxis/config.yaml"]

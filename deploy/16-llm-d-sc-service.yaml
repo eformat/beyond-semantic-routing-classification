@@ -1,0 +1,18 @@
+# ClusterIP fronting the classifier on the port the praxis config points at
+# (llm-d-sc.beyond-routing.svc.cluster.local:50051).
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-d-sc
+  labels:
+    app.kubernetes.io/name: llm-d-sc
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: llm-d-sc
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP

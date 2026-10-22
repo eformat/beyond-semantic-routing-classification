@@ -1,0 +1,24 @@
+# Edge-terminated TLS, so ad-hoc curls and OpenCode's custom provider can
+# reach the proxy from the laptop. TLS stops at the router; in-cluster traffic
+# to the Service is plain HTTP, which is what the Praxis listener speaks.
+#
+# No spec.host on purpose: the cluster assigns one under its apps domain
+# (praxis-beyond-routing.apps.ocp.cloud.rhai-tmm.dev). That assigned host is
+# the OpenCode custom-provider baseURL (see deploy/README.md).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: praxis
+  labels:
+    app.kubernetes.io/name: praxis
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  to:
+    kind: Service
+    name: praxis
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,167 @@
+# Body-based MaaS model selection with llm-d-sc (beyond-routing-filter v0.2.0).
+#
+# A POST to /v1/chat/completions has its prompt extracted, classified by
+# llm-d-sc over gRPC, and the request body's `model` field rewritten to the
+# FULL internal MaaS model path for the winning label. One endpoint, one
+# cluster, model selection in the body:
+#
+#   client ──POST /chat/completions──▶ praxis :8080
+#                                        │
+#                      pre-read body (StreamBuffer, whole body, one chunk)
+#                                        │
+#                                 ┌──────▼───────┐
+#                                 │   llm_d_sc   │──h2c──▶ llm-d-sc :50051
+#                                 └──────┬───────┘◀── ranked signals
+#                                        │ filter_metadata llm_d_sc.model
+#                                 ┌──────▼───────┐
+#                                 │   json_body  │  /model ← llm_d_sc.model
+#                                 └──────┬───────┘
+#                                 ┌──────▼───────────┐
+#                                 │ load_balancer    │──TLS──▶ MaaS /v1
+#                                 └──────────────────┘   (one endpoint, ALL models)
+#
+# Usage:
+#   # 1. llm-d-sc (already built)
+#   LLM_D_SC_MODEL_DIR=~/llm-d-sc-genesis/artifacts/models/complexity \
+#   LLM_D_SC_CLASSIFIER=complexity \
+#   LLM_D_SC_LISTEN=127.0.0.1:50051 \
+#     ~/llm-d-sc-genesis/target/release/llm-d-sc-server
+#
+#   # 2. praxis, with this crate listed in server/Cargo.toml
+#   cargo run -p praxis-proxy -- -c examples/llm-d-sc-routing.yaml
+#
+# Exercise:
+#   curl -s localhost:8080/chat/completions -H 'content-type: application/json' \
+#     -d '{"model":"anything","messages":[{"role":"user","content":"What is the capital of France?"}]}'
+#   # -> SIMPLE -> /model rewritten to publishers/.../llama-32-3b
+#
+#   curl -s localhost:8080/chat/completions -H 'content-type: application/json' \
+#     -d '{"model":"anything","messages":[{"role":"user","content":"Prove by induction that the sum of the first n odd numbers is n squared."}]}'
+#   # -> REASONING -> /model rewritten to publishers/.../glm-53-flash
+#
+#   # Stop llm-d-sc and repeat: fail-open — no llm_d_sc.model metadata is
+#   # published, the json_body replace is SKIPPED, and the client's original
+#   # model value passes through unchanged. A classifier outage degrades
+#   # routing quality; it does not take the gateway down.
+
+listeners:
+  - name: ai-gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - inference
+
+filter_chains:
+  - name: inference
+    filters:
+      # Correlation id first, so `llm_d_sc` can reuse it as the
+      # ClassifyRequest.request_id and the classification lines up with the
+      # access log.
+      - filter: request_id
+
+      # The routing decision, one JSON record per request. v0.7.5 access_log
+      # renders filter metadata via explicit `metadata.<key>` field tokens;
+      # `fields` REPLACES the default ten, so the defaults are repeated here.
+      - filter: access_log
+        fields:
+          - method
+          - path
+          - client_ip
+          - status
+          - duration_ms
+          - cluster
+          - upstream
+          - request_id
+          - metadata.llm_d_sc.status
+          - metadata.llm_d_sc.label
+          - metadata.llm_d_sc.model
+          - metadata.llm_d_sc.score
+          - metadata.llm_d_sc.latency_us
+
+      # NOTE: `llm_d_sc` is used INSTEAD OF `router`, not alongside it. Two
+      # cluster-selecting filters before the same load_balancer is a build
+      # error (`check_conflicting_cluster_selectors`).
+      #
+      # The `model` paths are the FULL internal MaaS paths body-based routing
+      # expects. The filter publishes the winning label's model as
+      # `llm_d_sc.model` filter_metadata; `default_model` covers every
+      # non-decision path (fail-open still routes to a known model).
+      - filter: llm_d_sc
+        endpoint: "127.0.0.1:50051"
+
+        # `signal` is deliberately omitted. One llm-d-sc process serves exactly
+        # one signal, and it answers INVALID_ARGUMENT for any signal name that
+        # is not that one. An empty signals list is always accepted.
+        # signal: complexity
+
+        default_cluster: maas
+        default_model: publishers/prelude-maas/models/llama-32-3b
+        routes:
+          - label: SIMPLE
+            cluster: maas
+            model: publishers/prelude-maas/models/llama-32-3b
+          - label: MEDIUM
+            cluster: maas
+            model: publishers/prelude-maas/models/nemotron-cascade-2-30b
+          - label: COMPLEX
+            cluster: maas
+            model: publishers/prelude-maas/models/qwen38-27b
+          - label: REASONING
+            cluster: maas
+            model: publishers/prelude-maas/models/glm-53-flash
+
+        # Total budget for the classify RPC. llm-d-sc's own numbers are
+        # 7.7-12.3 ms on a cache miss and ~0.09 ms on a hit, so 100 ms is
+        # generous headroom, not a tight bound.
+        timeout_ms: 100
+        connect_timeout_ms: 1000
+
+        # Route on the top ranked label regardless of score.
+        min_score: 0.0
+        max_prompt_chars: 4096
+        max_body_bytes: 1048576
+
+        # Fail open: a classifier outage costs routing quality, not availability.
+        on_unavailable: default_cluster
+        on_resource_exhausted: default_cluster
+        status_on_reject: 503
+
+        # Provenance to upstream: x-llm-d-sc-{label,model,score,classifier,
+        # taxonomy-revision,status,latency-us}. Client-supplied x-llm-d-sc-*
+        # headers are stripped on every path regardless of this setting.
+        emit_headers: true
+
+      # Body-based model selection: replaces /model with the value of the
+      # `llm_d_sc.model` filter_metadata key (injected as a JSON string).
+      #
+      # v0.7.5 semantics: a replace whose metadata source is missing SKIPS the
+      # operation (the original member is left unchanged), so requests with no
+      # classification pass through with the client's original model. There is
+      # no way to gate a json_body filter on another filter's results in
+      # v0.7.5 — this metadata contract IS the mechanism.
+      - filter: json_body
+        content_types:
+          - application/json
+        max_body_bytes: 10485760
+        on_invalid: continue
+        request_replace:
+          - pointer: /model
+            metadata: llm_d_sc.model
+
+      # Every cluster named in llm_d_sc -- including default_cluster -- must be
+      # defined here (`check_misaligned_clusters`).
+      - filter: load_balancer
+        clusters:
+          - name: maas
+            load_balancer_strategy: round_robin
+            endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev:443"
+            http:
+              authority: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              base_path: /v1
+            tls:
+              sni: "maas.apps.ocp.cloud.rhai-tmm.dev"
+              verify: true
+            trusted_private_endpoints:
+              - "maas.apps.ocp.cloud.rhai-tmm.dev"
+            connection_timeout_ms: 5000
+            total_connection_timeout_ms: 10000

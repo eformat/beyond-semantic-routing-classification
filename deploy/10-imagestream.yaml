@@ -1,0 +1,12 @@
+# Holds the Praxis-with-beyond-routing image produced by the BuildConfig.
+# The cluster's internal registry is the only push target for this POC.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: praxis-beyond-routing
+  labels:
+    app.kubernetes.io/name: praxis
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  lookupPolicy:
+    local: true

@@ -1,0 +1,23 @@
+# Rust build artifacts (~2 GB; the in-container build cannot reuse them anyway)
+router/target/
+
+# Weights are NEVER committed (the ModelCar staging materializes them here only
+# transiently; the shipped pattern is the llm-d-semantic-classifier repo's).
+artifacts/
+**/models/*.safetensors
+
+# Credentials: local env files are BY DESIGN gitignored — never add them.
+.env
+.env.*
+.envrc
+
+# Local build contexts (hack/stage-build-context.sh destinations) and demo
+# evidence captures.
+praxis-build-context.*/
+llmd-modelcar.*/
+demo/evidence/
+
+# Editor / OS droppings
+*.swp
+.DS_Store
+node_modules/

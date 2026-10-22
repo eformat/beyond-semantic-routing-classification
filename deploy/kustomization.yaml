@@ -1,0 +1,38 @@
+# Static resources plus the ConfigMap generated from deploy/config/.
+#
+# NOT included here: the `maas-api-key` Secret. It is created imperatively at
+# deploy time, precisely so that no file in this repository ever holds the
+# credential (see deploy/secret.example.yaml for the shape).
+#
+# `oc apply -k deploy/` therefore produces everything except that Secret.
+# NOTE: 00-namespace.yaml is deliberately NOT in resources. The deploy target
+# is the PRE-EXISTING user-mhepburn sandbox (227d old) -- applying a Namespace
+# object into it would patch the user's live namespace. The file stays for the
+# future GitOps wiring (beyond-routing ns in rhoai-cluster-pool).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: user-mhepburn
+
+resources:
+  - 10-imagestream.yaml
+  - 15-llm-d-sc-deployment.yaml
+  - 16-llm-d-sc-service.yaml
+  - 20-buildconfig.yaml
+  - 30-deployment.yaml
+  - 40-service.yaml
+  - 50-route.yaml
+
+# Stable names: the Deployment references `praxis-config` directly, and the
+# deploy flow swaps that ConfigMap's contents to switch config variants.
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app.kubernetes.io/part-of: beyond-semantic-routing
+
+configMapGenerator:
+  # The live config. deploy/config/praxis-config.yaml is the single source of
+  # truth: the same file is validated inside the image build.
+  - name: praxis-config
+    files:
+      - praxis.yaml=config/praxis-config.yaml
