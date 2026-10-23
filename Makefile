@@ -30,7 +30,7 @@ LLMD_IMAGE   := $(REGISTRY)/llm-d-sc:$(LLMD_TAG)
 LLMD_CAR     := $(REGISTRY)/llm-d-sc-modelcar:$(LLMD_TAG)
 COLLECTOR_IMAGE := $(REGISTRY)/beyond-routing-collector:$(COLLECTOR_TAG)
 
-.PHONY: help image image-push llmd-sc-image llmd-sc-image-push llmd-sc-modelcar llmd-sc-modelcar-push collector-image collector-image-push secret deploy status smoke undeploy
+.PHONY: help image image-push llmd-sc-image llmd-sc-image-push llmd-sc-modelcar llmd-sc-modelcar-push collector-image collector-image-push secret deploy status smoke undeploy scale-down-gpu scale-down-cpu
 
 help:
 	@echo "beyond-semantic-routing PoC — make targets"
@@ -98,3 +98,9 @@ smoke: ## Resolve the Route + key from the cluster and run the smoke test.
 undeploy: ## Delete ONLY the label-selected PoC resources -- NEVER the namespace itself.
 	oc -n $(NAMESPACE) delete deployment,service,route,buildconfig,imagestream,configmap \
 	  -l '$(LABEL)' --ignore-not-found
+
+scale-down-gpu: ## Stop/scale down every GPU-consuming workload in this repo (LLMInferenceServices deleted, raw GPU deployments to 0; the CPU decisioning path stays up).
+	bash hack/scale-down-gpu.sh $(NAMESPACE)
+
+scale-down-cpu: ## Scale down the remaining CPU deployments (praxis, llm-d-sc, collector) — the complement of scale-down-gpu; reversible, the objects and services stay.
+	bash hack/scale-down-cpu.sh $(NAMESPACE)
