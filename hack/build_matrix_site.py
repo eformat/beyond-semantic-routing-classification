@@ -556,9 +556,18 @@ def main():
     args = ap.parse_args()
     run_path = args.run
     if run_path is None:
-        runs = sorted(RESULTS.glob("*-matrix.json"))
+        # the records are named ...-matrix.json (pilot-era) and
+        # ...-matrix-<tag>.json (tagged runs); the filename sort cannot order
+        # same-day records (16conv vs 4arm-real), so sort by the record's
+        # internal run.date (fall back to the filename when absent)
+        def run_dt(p):
+            try:
+                return json.loads(p.read_text()).get("run", {}).get("date") or ""
+            except (OSError, ValueError):
+                return ""
+        runs = sorted(RESULTS.glob("*-matrix*.json"), key=lambda p: (run_dt(p), p.name))
         if not runs:
-            raise SystemExit("no results/*-matrix.json found — run hack/matrix-arms.py first")
+            raise SystemExit("no results/*-matrix*.json found — run hack/matrix-arms.py first")
         run_path = str(runs[-1])
     out = build(run_path, args.out)
     print(f"site -> {out}")
