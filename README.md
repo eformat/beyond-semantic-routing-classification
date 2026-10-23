@@ -2,46 +2,61 @@
 
 A PoC that goes **beyond prompt classification**: choosing the right model for the next turn of a
 multi-turn conversation without compromising the rest of the task — and determining where semantic
-routing belongs in an existing inference stack.
+routing belongs in an existing inference stack. **The finding so far:** the routing policy matters
+less than the KV-cache substrate behind it — the same router over four substrates that differ only
+in cache management swings multi-turn TTFT by 26% and total conversation cost by 40%
+(→ [docs/EXPERIMENT.md](docs/EXPERIMENT.md)).
 
-## The stack
+## The stack (current: the 4-arm substrate comparison)
 
 ```
 opencode / client (multi-turn, full messages[] each turn — no client changes)
    ▼
 Praxis edge gateway (this repo's beyond-routing-filter crate)
-   llm-d-sc signal (gRPC) + policy → model published as llm_d_sc.model metadata
-   json_body rewrites /model → MaaS BODY-BASED routing at one endpoint
+   llm-d-sc signal (gRPC) → tier splice → llm_d_sc.model metadata per classification
    ▼
-MaaS (TMM: maas.apps.ocp.cloud.rhai-tmm.dev/v1) · later: sardeenz + kvcached tier
+Inference substrate — the ONLY experimental variable, four arms:
+   :8080  arm A  native vLLM APC, two MIG slices (18GB + 35GB)
+   :8081  arm B  kvcached, APC disabled — re-prefill every turn (the counterfactual)
+   :8082  arm C  kvcached, bounded APC, two MIG slices
+   :8083  arm D  kvcached, bounded APC, both models on one 71GB slice
    ▼
-Serving: prelude-maas models (llama-32-3b … qwen38-27b, glm-53-flash)
+REASONING tier escalates to the MaaS gateway's glm-53-flash — identical on every
+arm, the built-in noise floor
 ```
+
+Routing: SIMPLE/MEDIUM → Qwen3-0.6B · COMPLEX → Qwen3-8B · REASONING → MaaS. Same engine
+(vLLM 0.30), same models, same node, same prompts on every arm.
 
 ## Layout
 
 ```
-router/    the beyond-routing-filter crate (Praxis HTTP filter, vendored from
-           llm-d-sc-praxis-filter v0.1.0 and evolved; praxis git dep v0.7.5)
-deploy/    OpenShift manifests for the TMM proving ground (namespace beyond-routing,
-           llm-d-sc classifier, praxis BuildConfig/Deployment/Route, body-routing config)
-docs/      architecture + findings (see the plan for the full phase structure)
-eval/      benchmarks (later phases: model-routing-eval corpus + synthetic conversations)
-demo/      live decisioning flow graphic (phase 1)
+router/      the beyond-routing-filter crate (Praxis HTTP filter, vendored from
+             llm-d-sc-praxis-filter v0.1.0 and evolved; praxis git dep v0.7.5)
+deploy/      OpenShift manifests: llm-d-sc classifier, praxis + the four arm
+             listeners, the phase-2 LLMInferenceServices, the collector stack
+collector/   live decisioning dashboard (flow.html) — lane-merged per-arm
+             comparison, routing stats, /snapshot · /events · /metrics, /reset
+hack/        experiment tooling: the matrix harness (matrix-arms.py), the results
+             site builder (build_matrix_site.py), the 4-arm replay (replay-arms.sh)
+eval/        benchmarks (model-routing-eval corpus + synthetic conversations)
+results/     run records (matrix-*.json) + the results site (site/index.html) —
+             one self-contained HTML per run
+docs/        architecture.md, EXPERIMENT.md (the full experiment write-up)
 ```
 
-## Phase 0 (current): MaaS body-based routing on TMM
+## The experiment
 
-- **Models (live `oc get llmisvc` in prelude-maas, all READY):** llama-32-3b, gemma4,
-  nemotron-cascade-2-30b, llama-4-scout-17b-16e-w4a16, qwen38-27b, glm-53-flash (chat) +
-  bge-m3 (embedding, not a routing target).
-- **Body-based routing** at the single MaaS endpoint `https://maas.apps.ocp.cloud.rhai-tmm.dev/v1`:
-  the request body `model` field carries the full internal path
-  (`publishers/prelude-maas/models/<name>`), rewritten by a praxis `json_body` filter from the
-  `llm_d_sc.model` metadata the filter publishes per classification.
-- **Starting tier map** (the tier × model matrix run measures the real table):
-  SIMPLE → llama-32-3b · MEDIUM → nemotron-cascade-2-30b · COMPLEX → qwen38-27b ·
-  REASONING → glm-53-flash · fail-open default → llama-32-3b.
+Four arms on the same physical node, same engine, same models, same prompts — **the only variable
+is the KV-cache substrate**. 16 conversations × 12 turns × 4 arms = 768 turns per run.
+
+Headline (Σ TTFT per conversation, median): **A 21.2s · B 26.0s · C 21.2s · D 20.7s** —
+no-reuse loses +23%, the kvcached VMM is cost-free with APC, and the single shared slice wins
+every metric (2× decode throughput, near-zero variance, lowest total cost).
+
+Full setup, results, conclusions and the routing-seam implications:
+**[docs/EXPERIMENT.md](docs/EXPERIMENT.md)** · the rendered narrative:
+**[results/site/index.html](results/site/index.html)**.
 
 ## Build
 
@@ -53,7 +68,15 @@ cargo +1.96.0 test     # in-process stub server, decision table, config validati
 The filter registers with any praxis server build via
 `[package.metadata.praxis-filters]` (build-time auto-discovery — see `Containerfile.praxis`).
 
-## Verify locally
+## Run
 
-See `deploy/README.md` for the smoke test plan (replicate the verified MaaS curl through praxis,
-observe-first posture) and the two open live verifications (MaaS key scoping, per-model tool calling).
+```bash
+make help              # the target list (images, deploy, status, smoke)
+make deploy            # apply all PoC resources into user-mhepburn
+hack/replay-arms.sh    # replay one fixture through all four arms — the
+                       # collector's Arm comparison renders the 4 lanes
+hack/matrix-arms.py    # full matrix run — writes results/matrix-*.json
+hack/build_matrix_site.py  # render the run into the self-contained results site
+```
+
+See `deploy/README.md` for the deployment details.

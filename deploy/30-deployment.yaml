@@ -100,6 +100,9 @@ spec:
             - name: http-arm-c
               containerPort: 8082
               protocol: TCP
+            - name: http-arm-d
+              containerPort: 8083
+              protocol: TCP
             - name: admin
               containerPort: 9901
               protocol: TCP

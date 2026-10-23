@@ -34,3 +34,7 @@ spec:
       port: 8082
       targetPort: http-arm-c
       protocol: TCP
+    - name: http-arm-d
+      port: 8083
+      targetPort: http-arm-d
+      protocol: TCP

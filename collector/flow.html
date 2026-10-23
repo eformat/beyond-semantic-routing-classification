@@ -16,6 +16,8 @@
   header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.2px}
   header .sub{color:var(--dim);font-size:12px}
   #live{margin-left:auto;font-size:12px;color:var(--dim)}
+  #reset{margin-left:12px;font:11px/1.2 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--dim);background:transparent;border:1px solid var(--line);border-radius:4px;padding:3px 10px;cursor:pointer}
+  #reset:hover{color:var(--fg);border-color:var(--dim)}
   #live .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--simple);margin-right:6px;animation:pulse 1.6s infinite}
   #live.down .dot{background:var(--complex);animation:none}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
@@ -51,6 +53,7 @@
   <h1>beyond-semantic-routing — live decisions</h1>
   <span class="sub">praxis → llm-d-sc → tier splice → MaaS</span>
   <span id="live"><span class="dot"></span>connecting…</span>
+  <button id="reset" title="clear the dashboard state (the sessions, the nodes and the stats); the log history is untouched">clear</button>
 </header>
 
 <main>
@@ -69,11 +72,12 @@
         <span><b style="background:var(--accent)"></b>arm A · native APC</span>
         <span><b style="background:var(--reasoning)"></b>arm B · kvcached no-APC</span>
         <span><b style="background:var(--medium)"></b>arm C · kvcached APC</span>
+        <span><b style="background:var(--simple)"></b>arm D · elastic sharing</span>
       </div>
     </div>
 
     <div class="panel">
-      <h2>Arm comparison · same conversation, three substrates</h2>
+      <h2>Arm comparison · same conversation, four substrates</h2>
       <div id="arms"></div>
     </div>
   </div>
@@ -89,18 +93,18 @@
 </main>
 
 <div id="tooltip"></div>
-<footer>collector: /snapshot · /events · /metrics (Prometheus) — the phase-2 view: the A/B/C substrate comparison (same conversation replayed through :8080/:8081/:8082)</footer>
+<footer>collector: /snapshot · /events · /metrics (Prometheus) — the phase-2 view: the A/B/C/D substrate comparison (same conversation replayed through :8080/:8081/:8082/:8083)</footer>
 
 <script>
 "use strict";
 const LABEL_COLOR = {SIMPLE:"var(--simple)",MEDIUM:"var(--medium)",COMPLEX:"var(--complex)",REASONING:"var(--reasoning)"};
 const colorFor = l => LABEL_COLOR[l] || "var(--none)";
-// PHASE 2: the substrate arms — the lane id suffix (:a / :b / :c) is the arm
-// (the phase-2 cluster names carry the arm prefix; parse_session appends it).
-const ARM_SUBSTRATE = {a:"native APC · static", b:"kvcached · no APC", c:"kvcached · APC"};
-const ARM_COLOR = {a:"var(--accent)", b:"var(--reasoning)", c:"var(--medium)"};
-const laneBase = id => id.replace(/:[abc]$/, "");
-const laneArm = id => (id.match(/:([abc])$/)||[])[1] || null;
+// PHASE 2: the substrate arms — the lane id suffix (:a / :b / :c / :d) is the
+// arm (the phase-2 cluster names carry the arm prefix; parse_session appends it).
+const ARM_SUBSTRATE = {a:"native APC · static", b:"kvcached · no APC", c:"kvcached · APC", d:"elastic sharing · one slice"};
+const ARM_COLOR = {a:"var(--accent)", b:"var(--reasoning)", c:"var(--medium)", d:"var(--simple)"};
+const laneBase = id => id.replace(/:[abcd]$/, "");
+const laneArm = id => (id.match(/:([abcd])$/)||[])[1] || null;
 const median = arr => { if (!arr.length) return null; const s=[...arr].sort((x,y)=>x-y); const m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; };
 const esc = s => String(s??"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const shortModel = m => (m && m.includes("/")) ? m.split("/").pop() : (m || "-");
@@ -181,7 +185,7 @@ function renderArms(sessions) {
   const el = document.getElementById("arms");
   // group the lanes by conversation base (the arm suffix stripped); a group
   // with 2+ arms is a substrate comparison — the same fixture replayed
-  // through :8080/:8081/:8082.
+  // through :8080/:8081/:8082/:8083.
   const groups = new Map();
   sessions.forEach(s => {
     const base = laneBase(s.id);
@@ -191,7 +195,7 @@ function renderArms(sessions) {
   const comparisons = [...groups.entries()].filter(([, g]) => g.length > 1)
     .sort((x,y) => latestTs(y[1]) - latestTs(x[1]));
   if (!comparisons.length) {
-    el.innerHTML = '<span style="color:var(--dim);font-size:12px">no multi-arm conversation yet — replay one fixture through :8080/:8081/:8082</span>';
+    el.innerHTML = '<span style="color:var(--dim);font-size:12px">no multi-arm conversation yet — replay one fixture through :8080/:8081/:8082/:8083</span>';
     return;
   }
   el.innerHTML = comparisons.map(([base, group]) => {
@@ -271,6 +275,11 @@ async function poll() {
 }
 
 addEventListener("resize", () => { fetch("/snapshot",{cache:"no-store"}).then(r=>r.json()).then(renderLanes).catch(()=>{}); });
+document.getElementById("reset").addEventListener("click", async () => {
+  if (!confirm("Clear the dashboard? (the sessions, the nodes and the stats go; the log history is untouched)")) return;
+  try { await fetch("/reset", {method: "GET", cache: "no-store"}); } catch (e) {}
+  poll();
+});
 poll();
 setInterval(poll, 2000);
 </script>

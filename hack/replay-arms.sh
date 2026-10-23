@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# Replay the SAME multi-turn conversation fixture through all three phase-2
-# substrate arms, for the A/B/C comparison.
+# Replay the SAME multi-turn conversation fixture through all four phase-2
+# substrate arms, for the A/B/C/D comparison.
 #
 #   :8080  arm A — native vLLM prefix caching (kvcached off)
 #   :8081  arm B — kvcached, --no-enable-prefix-caching
 #   :8082  arm C — kvcached + APC
+#   :8083  arm D — kvcached + APC, both models on one shared slice
 #
 # The fixture is a 3-turn conversation with a shared long prefix (every turn
 # resends the full history, as a chat client does) so the KV-cache semantics
 # differ per arm: A/C should show prefix-cache HITS on turns 2-3, B shows the
 # full re-prefill cost (no reuse by design).
 #
-# The same x-session-id is used on all three arms — the collector groups by
+# The same x-session-id is used on all four arms — the collector groups by
 # (conversation fingerprint, arm), so the graphic renders the same conversation
-# as three side-by-side lanes.
+# as four side-by-side lanes.
 #
 # Usage: hack/replay-arms.sh [namespace]   (KUBECONFIG inherited; praxis svc
 #          ports are reached via oc port-forward from localhost)
@@ -31,8 +32,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "session id: $SESSION (collector lane key)"
-echo "port-forwarding svc/praxis 8080/8081/8082 ..."
-oc -n "$NAMESPACE" port-forward svc/praxis 8080 8081 8082 >"$PF_DIR/pf.log" 2>&1 &
+echo "port-forwarding svc/praxis 8080/8081/8082/8083 ..."
+oc -n "$NAMESPACE" port-forward svc/praxis 8080 8081 8082 8083 >"$PF_DIR/pf.log" 2>&1 &
 PF_PID=$!
 for i in $(seq 1 30); do
   grep -q "Forwarding from" "$PF_DIR/pf.log" 2>/dev/null && break
@@ -78,12 +79,13 @@ arm() {
 arm 8080 A
 arm 8081 B
 arm 8082 C
+arm 8083 D
 
 echo
 echo "Replay complete. Session lane key: $SESSION"
 echo "Next:"
-echo "  - collector graphic (three side-by-side lanes for $SESSION)"
+echo "  - collector graphic (four side-by-side lanes for $SESSION)"
 echo "  - kvcached signature in the b-*/c-* pods:"
 echo "      oc -n $NAMESPACE logs -l app.kubernetes.io/name=b-qwen3-06b | grep -i kvcached | head"
-echo "  - prefix-cache hits (arms A/C) vs zero hits (arm B):"
+echo "  - prefix-cache hits (arms A/C/D) vs zero hits (arm B):"
 echo "      oc -n $NAMESPACE exec \$(oc -n $NAMESPACE get pod -l app.kubernetes.io/name=a-qwen3-06b,kserve.io/component=workload -o name | head -1) -- curl -sk https://localhost:8000/metrics | grep prefix_cache"

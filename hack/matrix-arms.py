@@ -35,6 +35,7 @@ ARMS = {
     "A": "https://praxis-user-mhepburn.apps.ocp.cloud.rhai-tmm.dev",
     "B": "https://praxis-arm-b-user-mhepburn.apps.ocp.cloud.rhai-tmm.dev",
     "C": "https://praxis-arm-c-user-mhepburn.apps.ocp.cloud.rhai-tmm.dev",
+    "D": "https://praxis-arm-d-user-mhepburn.apps.ocp.cloud.rhai-tmm.dev",
 }
 NAMESPACE = "user-mhepburn"
 
@@ -63,19 +64,25 @@ _long_ctx_cache = None
 
 
 def long_context():
-    """Build the ~15K-token shared document once (identical every turn/arm)."""
+    """The shared prefix: the REAL beyond-routing router source (filter.rs,
+    config.rs, testing.rs, prompt.rs — ~14K tokens of the actual code being
+    routed through), read from the local repo at run time."""
     global _long_ctx_cache
     if _long_ctx_cache is None:
+        root = Path(__file__).resolve().parent.parent
+        files = ["router/src/filter.rs", "router/src/config.rs",
+                 "router/src/testing.rs", "router/src/prompt.rs"]
         parts = []
-        for i in range(64):
-            name = f"filter_stage_{i:02d}"
-            parts.append(MODULE_TMPL.format(name=name, Name=f"Stage{i:02d}", i=i,
-                                            timeout=250 + (i % 12) * 50,
-                                            base=40 + (i % 7) * 15))
-        _long_ctx_cache = ("You are a code-review assistant for a Rust HTTP proxy. "
-                           "The following is the crate's filter-stage module dump "
-                           "(64 stages). Answer questions about this design "
-                           "concisely.\n\n" + "".join(parts))
+        for rel in files:
+            p = root / rel
+            if p.exists():
+                parts.append(f"// ===== {rel} =====\n" + p.read_text())
+        _long_ctx_cache = ("You are a code-review assistant for a Rust HTTP proxy "
+                           "(praxis). The following is the router crate's REAL source "
+                           "— the request filter that classifies prompts via a gRPC "
+                           "classifier, splices the resolved model into the JSON body, "
+                           "and publishes filter metadata. Answer questions about this "
+                           "code concisely.\n\n" + "\n\n".join(parts))
     return _long_ctx_cache
 
 
@@ -87,37 +94,32 @@ def approx_tokens(text):
 # so the prompt grows and the shared prefix compounds.
 TURNS = [
     ("SIMPLE", "Reply with exactly one word: ok"),
-    ("MEDIUM", "Summarise the retry-budget interaction noted in the module dump in one sentence."),
+    ("MEDIUM", "In one sentence: what does the request_id filter do before the classifier runs?"),
     ("SIMPLE", "What is 2+2? One word."),
     ("COMPLEX", "Design a fault-tolerant multi-region payment platform: choose an "
                 "event-sourcing vs CQRS split, reason through exactly-once semantics "
                 "under network partitions, idempotency keys at every write path, "
                 "leader election, and a reconciliation strategy for cross-ledger "
                 "drift. Justify each trade-off."),
-    ("MEDIUM", "Which stage modules would break if the timeout floor dropped below 100ms, and why?"),
-    ("SIMPLE", "Name the TLS mode used by the stage configs. One word."),
-    ("COMPLEX", "Reason through the proxy's failure modes: the connect-phase dead "
-                "zone, the pre-read copy-back dropping queued headers, and a stalled "
-                "upstream gateway. For each, derive the mitigation the design already "
-                "has and the one it still needs."),
-    ("MEDIUM", "Why does the idempotent json_body repeat not double-apply the splice?"),
-    ("SIMPLE", "How many stage modules are in the dump? One number."),
+    ("MEDIUM", "Why does the body hook queue headers via filter_state instead of "
+               "request_headers_to_set, given the pre-read copy-back?"),
+    ("SIMPLE", "Name the gRPC endpoint the llm_d_sc filter calls. One word."),
+    ("COMPLEX", "Reason through the proxy's failure modes: the classifier unavailable, "
+                "a stalled upstream gateway, and a non-JSON body reaching the splice. "
+                "For each, derive the fail-open behaviour the code actually implements "
+                "and the one it still needs."),
+    ("MEDIUM", "Why is the in-chain json_body replace skipped when the classifier "
+               "metadata is absent, per the code?"),
+    ("SIMPLE", "Which crate file holds the access-log field list? One word."),
     ("MEDIUM", "What does filter_state survive that a queued header does not, and why?"),
     ("REASONING", "Prove or disprove: for every positive integer n, the number n^7 - n "
                   "is divisible by 42. Construct a rigorous number-theoretic argument, "
                   "considering both cases where n is prime and composite, and derive "
                   "the minimal divisibility set from first principles."),
-    ("COMPLEX", "Propose the minimal change to the filter design that would let the "
-                "body-phase classification escalate mid-conversation without a second "
-                "gateway hop, and reason through what breaks."),
+    ("COMPLEX", "Propose the minimal change to this filter that would let the body-phase "
+                "classification escalate mid-conversation without a second gateway hop, "
+                "and reason through what breaks in the pre-read copy-back."),
 ]
-
-WORKLOAD_LABELS = {
-    "A": ("a-qwen3-06b", "a-qwen3-8b"),
-    "B": ("b-qwen3-06b", "b-qwen3-8b"),
-    "C": ("c-qwen3-06b", "c-qwen3-8b"),
-}
-
 
 def chat(base, session, messages, max_tokens=200):
     """One streaming turn: TTFT (time to the FIRST delta chunk of any kind —
@@ -167,29 +169,47 @@ def chat(base, session, messages, max_tokens=200):
     }
 
 
-def prefix_cache_counters(isvc):
-    """vllm:prefix_cache_{queries,hits}_total + vllm:gpu_cache_usage_perc from
-    the arm's 8B workload pod — the cache-hit proof AND the memory-pressure
-    axis (the kvcached elastic-vs-static differentiator)."""
+WORKLOAD_LABELS = {
+    "A": ("a-qwen3-06b", "a-qwen3-8b"),
+    "B": ("b-qwen3-06b", "b-qwen3-8b"),
+    "C": ("c-qwen3-06b", "c-qwen3-8b"),
+}
+
+
+def cache_counters(arm):
+    """The 8B engine's prefix-cache counters + the gpu cache usage, per arm.
+    Arms A/B/C: the kserve workload pods (the label selector, the metrics on
+    :8000 over HTTPS with the per-pod KServe certs). Arm D: the dual-engine
+    plain Deployment (the 8B engine on :8001, PLAIN HTTP — no KServe TLS)."""
+    if arm == "D":
+        label = "app.kubernetes.io/name=d-dual-vllm"
+        port = 8001
+        conn = "http.client.HTTPConnection('localhost', port)"
+    else:
+        isvc = WORKLOAD_LABELS[arm][1]
+        label = f"app.kubernetes.io/name={isvc},kserve.io/component=workload"
+        port = 8000
+        conn = ("http.client.HTTPSConnection('localhost', port, context=ctx)")
     pod = subprocess.run(
-        ["oc", "-n", NAMESPACE, "get", "pod",
-         "-l", f"app.kubernetes.io/name={isvc},kserve.io/component=workload",
+        ["oc", "-n", NAMESPACE, "get", "pod", "-l", label,
          "-o", "jsonpath={.items[0].metadata.name}"],
         capture_output=True, text=True, timeout=60).stdout.strip()
     out = subprocess.run(
         ["oc", "-n", NAMESPACE, "exec", pod, "--", "python3", "-c",
-         "import http.client, ssl\n"
+         "import http.client, ssl, sys\n"
+         "port = int(sys.argv[1])\n"
          "ctx = ssl.create_default_context(); ctx.check_hostname=False; "
          "ctx.verify_mode=ssl.CERT_NONE\n"
-         "c = http.client.HTTPSConnection('localhost', 8000, context=ctx)\n"
-         "c.request('GET', '/metrics')\n"
-         "for line in c.getresponse().read().decode().splitlines():\n"
+         "conn = " + conn + "\n"
+         "conn.request('GET', '/metrics')\n"
+         "for line in conn.getresponse().read().decode().splitlines():\n"
          "    if line.startswith('vllm:prefix_cache_queries_total') or "
          "line.startswith('vllm:prefix_cache_hits_total'):\n"
          "        print(line.split()[-1])\n"
          "    elif line.startswith('vllm:gpu_cache_usage_perc') and not "
          "line.startswith('#'):\n"
-         "        print(line.split()[-1])"],
+         "        print(line.split()[-1])",
+         str(port)],
         capture_output=True, text=True, timeout=120).stdout.split()
     if len(out) >= 3:
         return {"queries": float(out[0]), "hits": float(out[1]),
@@ -231,8 +251,7 @@ def main():
         return max(1, (r.get("gen_chars") or 0) // 4)
 
     for arm, base in ARMS.items():
-        small, big = WORKLOAD_LABELS[arm]
-        cache[arm] = {"before": prefix_cache_counters(big), "after": None}
+        cache[arm] = {"before": cache_counters(arm), "after": None}
         print(f"--- arm {arm} ({base}) cache before: {cache[arm]['before']}")
 
         for conv in range(args.conversations):
@@ -267,7 +286,7 @@ def main():
                     print(f"  [{arm}] conv{conv} r{rep} turn{ti} ({intent}) -> "
                           f"{m['served']} ttft={m['ttft_s']}s total={m['latency_s']}s {status}")
 
-        cache[arm]["after"] = prefix_cache_counters(big)
+        cache[arm]["after"] = cache_counters(arm)
         print(f"--- arm {arm} cache after: {cache[arm]['after']}")
 
     # -- summary ---------------------------------------------------------------
@@ -316,12 +335,21 @@ def main():
             if ttfts:
                 sums.append(sum(ttfts))
                 sums_total.append(sum(tots))
+        # the stall accounting: the turns whose TTFT stalled (>20s — the 60s
+        # pattern is the known transient); the median is the outlier-resistant
+        # per-conversation headline (one 60s stall in a conversation inflates
+        # that conversation's mean by ~5s per turn)
+        stalls = [r for r in rows if r["arm"] == arm and (r.get("ttft_s") or 0) > 20]
         conv_summary[arm] = {
             "conversations": len(sums),
             "sum_ttft_mean": round(statistics.mean(sums), 2) if sums else None,
+            "sum_ttft_median": round(statistics.median(sums), 2) if sums else None,
             "sum_ttft_min": round(min(sums), 2) if sums else None,
             "sum_ttft_max": round(max(sums), 2) if sums else None,
             "sum_total_mean": round(statistics.mean(sums_total), 2) if sums_total else None,
+            "sum_total_median": round(statistics.median(sums_total), 2) if sums_total else None,
+            "stall_turns": len(stalls),
+            "turns_total": len([r for r in rows if r["arm"] == arm]),
         }
         if sums:
             print(f"{arm:4} {len(sums):>3} {statistics.mean(sums):>18.2f} "
@@ -336,6 +364,14 @@ def main():
         if dpts:
             s = sorted(dpts)
             print(f"{arm:4} {len(dpts):>3} {s[min(len(s)-1, int(.5*len(s)))]:>20.1f}")
+
+    # -- the stall rate: the 60s TTFT pattern ----------------------------------
+    print("\n=== TTFT stalls (>20s, the ~60s transient) ===")
+    for arm in ARMS:
+        cs = conv_summary.get(arm) or {}
+        if cs:
+            print(f"arm {arm}: {cs['stall_turns']} stalls / {cs['turns_total']} turns "
+                  f"({cs['stall_turns']/max(1, cs['turns_total'])*100:.1f}%)")
 
     record = {
         "run": {

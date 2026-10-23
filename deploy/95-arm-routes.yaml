@@ -45,3 +45,21 @@ spec:
   tls:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: praxis-arm-d
+  labels:
+    app.kubernetes.io/name: praxis
+    app.kubernetes.io/part-of: beyond-semantic-routing
+spec:
+  to:
+    kind: Service
+    name: praxis
+    weight: 100
+  port:
+    targetPort: http-arm-d
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

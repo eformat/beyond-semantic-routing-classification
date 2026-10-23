@@ -1,0 +1,27 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - heading "beyond-semantic-routing — live decisions" [level=1] [ref=e3]
+    - generic [ref=e4]: praxis → llm-d-sc → tier splice → MaaS
+    - generic [ref=e5]: connecting…
+  - main [ref=e7]:
+    - generic [ref=e8]:
+      - generic [ref=e9]:
+        - heading "Conversation lanes · one node per routed turn" [level=2] [ref=e10]
+        - generic [ref=e11]:
+          - generic [ref=e12]: SIMPLE
+          - generic [ref=e14]: MEDIUM
+          - generic [ref=e16]: COMPLEX
+          - generic [ref=e18]: REASONING
+          - generic [ref=e20]: other / no decision
+        - generic [ref=e24]:
+          - generic [ref=e25]: arm A · native APC
+          - generic [ref=e27]: arm B · kvcached no-APC
+          - generic [ref=e29]: arm C · kvcached APC
+          - generic [ref=e31]: arm D · elastic sharing
+      - heading "Arm comparison · same conversation, three substrates" [level=2] [ref=e34]
+    - generic [ref=e35]:
+      - heading "Routing stats" [level=2] [ref=e36]
+      - table
+      - heading "Decisions by tier" [level=2] [ref=e37]
+      - heading "Models served" [level=2] [ref=e38]
+  - contentinfo [ref=e39]: "collector: /snapshot · /events · /metrics (Prometheus) — the phase-2 view: the A/B/C substrate comparison (same conversation replayed through :8080/:8081/:8082)"

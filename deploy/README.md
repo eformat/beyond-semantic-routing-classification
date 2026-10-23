@@ -140,23 +140,35 @@ an in-place escalation lever that switches quality without switching models.
 
 ## Phase 2: the three-arm substrate comparison (Arm A/B/C on the SAME engine)
 
-### The arms (`deploy/85-phase2-llmisvc.yaml` reference + `deploy/90-phase2-arms.yaml` comparison fleet)
+### The arms (`deploy/85-phase2-llmisvc.yaml` reference + `deploy/90-phase2-arms.yaml` + `deploy/97-arm-d.yaml`)
 
 Phase 2 compares KV-cache SUBSTRATES, holding everything else constant: all
-six comparison LLMISVCs run the SAME engine (vLLM 0.30 from the official
-kvcached pairing `ghcr.io/ovg-project/kvcached-vllm:latest` — the thin
+comparison arms run the SAME engine (vLLM 0.30 from the official kvcached
+pairing `ghcr.io/ovg-project/kvcached-vllm:latest` — the thin
 `Containerfile.kvcached` layer only adds OpenShift arbitrary-UID cache-dir
-fixes), same models, same MIG profiles, same revision pins.
+fixes), same models, same revision pins. Arms A–C are per-model LLMISVCs
+(separate MIG slices); **Arm D is the elastic memory-SHARING experiment** —
+both models resident on ONE slice.
 
-| Arm | LLMISVCs | Substrate | vLLM args / env |
+| Arm | Serving | Substrate | vLLM args / env |
 |---|---|---|---|
-| **A** (static per-slice cache) | `a-qwen3-06b` (mig-18gb), `a-qwen3-8b` (mig-35gb) | native vLLM prefix caching, kvcached OFF | `--enable-prefix-caching` |
-| **B** (elastic, no reuse) | `b-qwen3-06b`, `b-qwen3-8b` | kvcached ON, APC OFF | `ENABLE_KVCACHED=true` `KVCACHED_AUTOPATCH=1` `--no-enable-prefix-caching`, NO `--gpu-memory-utilization` (kvcached manages memory) |
-| **C** (elastic + bounded APC) | `c-qwen3-06b`, `c-qwen3-8b` | kvcached ON, APC ON | `ENABLE_KVCACHED=true` `KVCACHED_AUTOPATCH=1` `--enable-prefix-caching` |
+| **A** (static per-slice cache) | `a-qwen3-06b` (mig-18gb), `a-qwen3-8b` (mig-35gb) LLMISVCs | native vLLM prefix caching, kvcached OFF | `--enable-prefix-caching` |
+| **B** (elastic, no reuse) | `b-qwen3-06b`, `b-qwen3-8b` LLMISVCs | kvcached ON, APC OFF | `ENABLE_KVCACHED=true` `KVCACHED_AUTOPATCH=1` `--no-enable-prefix-caching`, NO `--gpu-memory-utilization` (kvcached manages memory) |
+| **C** (elastic + bounded APC) | `c-qwen3-06b`, `c-qwen3-8b` LLMISVCs | kvcached ON, APC ON | `ENABLE_KVCACHED=true` `KVCACHED_AUTOPATCH=1` `--enable-prefix-caching` |
+| **D** (elastic sharing, ONE slice) | ONE MIG **3g.71gb** slice, TWO vLLM processes in one plain Deployment (`d-dual-vllm`: 0.6B on :8000, 8B on :8001) sharing the memory pool through kvcached's VMM — 53GB statically partitioned in A–C becomes 71GB shared | kvcached ON, APC ON, one pool | same flags as C; NO `--gpu-memory-utilization` (kvcached manages); the launch script exports `HOME`/`HF_HOME`/`TORCHINDUCTOR_CACHE_DIR` to the PVC (the spawned EngineCore subprocesses default to `HOME=/` and die creating `/.cache`) |
+
+Arm D cannot be an LLMInferenceService (an LLMISVC serves one model per
+workload) — it is a plain Deployment with a launch-script ConfigMap
+(`deploy/97-arm-d.yaml`), the models fetched into a PVC by a
+`model-fetch` initContainer (`HF_HUB_DISABLE_XET=1` — the XET backend fails
+on the PVC), `fsGroup` from the namespace's `sa.scc.supplemental-groups`
+range, and one Service with two named ports. Plain HTTP — no KServe TLS.
 
 Plus the RHOAI-production reference: the original `qwen3-06b`/`qwen3-8b`
-LLMISVCs (`deploy/85-phase2-llmisvc.yaml`, rhaiis vLLM 0.13) stay live — the
-as-deployed MaaS-tier baseline, NOT the comparison control.
+LLMISVCs (`deploy/85-phase2-llmisvc.yaml`, rhaiis vLLM 0.13) — RETIRED from
+the cluster for now (nothing routed to them in the phase-2 layout); the
+manifests stay as the as-deployed baseline, re-add the kustomization
+resource line to bring them back.
 
 kvcached notes (upstream-confirmed from ovg-project/kvcached):
 - kvcached requires vLLM ≥ 0.17 — the rhaiis 0.13 image is below the minimum,
@@ -225,13 +237,14 @@ ONE praxis, one port per substrate arm:
 ```
               ┌─ listener :8080 ─ chain A ─→ a-qwen3-06b, a-qwen3-8b   (native APC, static)
 prompt ───────┤  listener :8081 ─ chain B ─→ b-qwen3-06b, b-qwen3-8b   (kvcached, no APC)
-              └─ listener :8082 ─ chain C ─→ c-qwen3-06b, c-qwen3-8b   (kvcached + APC)
+              │  listener :8082 ─ chain C ─→ c-qwen3-06b, c-qwen3-8b   (kvcached + APC)
+              └─ listener :8083 ─ chain D ─→ d-qwen3-06b, d-qwen3-8b   (elastic sharing, ONE slice)
 ```
 
-- Cluster names carry the arm prefix (`a-`/`b-`/`c-`), so the access log's
-  `cluster` field shows which arm served each turn; each arm's chain routes
-  per label: SIMPLE/MEDIUM → the arm's 0.6b, COMPLEX → the arm's 8b, and
-  REASONING → **the MaaS gateway's glm-5.3-flash** (`<arm>-maas-reasoning`
+- Cluster names carry the arm prefix (`a-`/`b-`/`c-`/`d-`), so the access
+  log's `cluster` field shows which arm served each turn; each arm's chain
+  routes per label: SIMPLE/MEDIUM → the arm's 0.6b, COMPLEX → the arm's 8b,
+  and REASONING → **the MaaS gateway's glm-5.3-flash** (`<arm>-maas-reasoning`
   clusters, all pointing at the same MaaS endpoint — identical across arms,
   so per-arm deltas on REASONING turns are the measurement noise floor). The
   arm prefix on the MaaS cluster names keeps the collector's lane grouping
@@ -398,7 +411,15 @@ Containerfile.kvcached           thin layer FROM the official kvcached-vllm 0.30
 deploy/85-phase2-llmisvc.yaml    the RHOAI-reference pair (qwen3-06b/8b, rhaiis vLLM)
 deploy/90-phase2-arms.yaml       the three-arm comparison fleet (a-/b-/c- × 0.6b/8b,
                                  kvcached image, ENABLE_KVCACHED per arm)
-deploy/config/praxis-config-phase2.yaml  the triple-listener arm config (:8080/:8081/:8082)
+deploy/97-arm-d.yaml             ARM D — the elastic memory-SHARING experiment (both models
+                                 on ONE 3g.71gb slice: the launch ConfigMap, the model PVC,
+                                 the dual-engine Deployment, the two-port Service)
+deploy/95-arm-routes.yaml        the external TLS Routes per arm (praxis-arm-b/c/d hosts)
+deploy/config/praxis-config-phase2.yaml  the four-listener arm config (:8080/:8081/:8082/:8083)
+hack/matrix-arms.py              the batched matrix harness (N conversations x M turns x
+                                 the arms, streaming TTFT, the cache counters before/after)
+hack/build_matrix_site.py        the results-site builder (the model-routing-eval design,
+                                 one self-contained HTML -> results/site/index.html)
 hack/stage-build-context.sh      assembles the binary-build context
 hack/undeploy-sardeenz.sh        name-based sardeenz teardown (the arm is retired)
 hack/deploy-sardeenz.sh          (retired, kept as reference) the original Arm B

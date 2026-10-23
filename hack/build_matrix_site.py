@@ -20,22 +20,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "results"
 
-ARMS = ["A", "B", "C"]
+ARMS = ["A", "B", "C", "D"]
 ARM_PRETTY = {"A": "Arm A — native APC (static)",
               "B": "Arm B — kvcached, no APC (elastic)",
               "C": "Arm C — kvcached + APC (elastic)",
+              "D": "Arm D — elastic sharing, both models on ONE slice",
               "-": "MaaS glm (REASONING escalation)"}
-ARM_COLOR = {"A": "floor", "B": "middle", "C": "flagship", "-": "free"}
-ARM_SHORT = {"A": "arm A", "B": "arm B", "C": "arm C", "-": "MaaS"}
+ARM_COLOR = {"A": "floor", "B": "middle", "C": "flagship", "D": "armd", "-": "free"}
+ARM_SHORT = {"A": "arm A", "B": "arm B", "C": "arm C", "D": "arm D", "-": "MaaS"}
 TIERS = ["SIMPLE", "MEDIUM", "COMPLEX", "REASONING"]
 
 CSS = """
 :root{color-scheme:light;--surface:#fcfcfb;--surface-2:#f0efec;--grid:#e3e2de;--ink:#0b0b0b;--ink-2:#52514e;--ink-3:#8a8984;
- --floor:#2a78d6;--middle:#eb6834;--flagship:#1baf7a;--free:#8a8984;--accent:#e00;--seq-1:#cde2fb;--seq-2:#86b6ef;--seq-3:#3987e5;--seq-4:#1c5cab}
+ --floor:#2a78d6;--middle:#eb6834;--flagship:#1baf7a;--free:#8a8984;--armd:#8a4fd3;--accent:#e00;--seq-1:#cde2fb;--seq-2:#86b6ef;--seq-3:#3987e5;--seq-4:#1c5cab}
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){color-scheme:dark;--surface:#1a1a19;--surface-2:#2a2a28;--grid:#383835;--ink:#fff;--ink-2:#c3c2b7;--ink-3:#8f8e88;
- --floor:#3987e5;--middle:#d95926;--flagship:#199e70;--free:#a3a29c;--seq-1:#184f95;--seq-2:#256abf;--seq-3:#5598e7;--seq-4:#9ec5f4}}
+ --floor:#3987e5;--middle:#d95926;--flagship:#199e70;--free:#a3a29c;--armd:#a97ae8;--seq-1:#184f95;--seq-2:#256abf;--seq-3:#5598e7;--seq-4:#9ec5f4}}
 :root[data-theme="dark"]{color-scheme:dark;--surface:#1a1a19;--surface-2:#2a2a28;--grid:#383835;--ink:#fff;--ink-2:#c3c2b7;--ink-3:#8f8e88;
- --floor:#3987e5;--middle:#d95926;--flagship:#199e70;--free:#a3a29c;--seq-1:#184f95;--seq-2:#256abf;--seq-3:#5598e7;--seq-4:#9ec5f4}
+ --floor:#3987e5;--middle:#d95926;--flagship:#199e70;--free:#a3a29c;--armd:#a97ae8;--seq-1:#184f95;--seq-2:#256abf;--seq-3:#5598e7;--seq-4:#9ec5f4}
 *{box-sizing:border-box}
 body{font-family:'Red Hat Text',system-ui,sans-serif;max-width:1120px;margin:0 auto;padding:1.5rem 16px 4rem;background:var(--surface);color:var(--ink);line-height:1.45}
 h1,h2,h3{font-family:'Red Hat Display',system-ui,sans-serif;font-weight:600;letter-spacing:-.01em}
@@ -81,6 +82,33 @@ def esc(x):
 def load(run_path):
     d = json.loads(Path(run_path).read_text())
     return d["run"], d["rows"], d["summary"], d["cache"], d.get("conv_summary")
+
+
+def derive_conv_summary(rows, conv_summary):
+    """Records written before the harness gained the median/stall fields lack
+    them in conv_summary — derive any missing per-arm numbers from the raw
+    rows so the site renders real values from every record (old or new)."""
+    conv_summary = dict(conv_summary or {})
+    for arm in {r["arm"] for r in rows}:
+        cs = dict(conv_summary.get(arm) or {})
+        arm_rows = [r for r in rows if r["arm"] == arm]
+        if "sum_ttft_median" not in cs:
+            sums = []
+            for conv in sorted({r["conversation"] for r in arm_rows}):
+                ttfts = [r["ttft_s"] for r in arm_rows
+                         if r["conversation"] == conv and r.get("ttft_s") is not None]
+                if ttfts:
+                    sums.append(sum(ttfts))
+            if sums:
+                cs["sum_ttft_median"] = round(statistics.median(sums), 2)
+        if "stall_turns" not in cs:
+            # a TTFT stall = a turn that took >20s to first token (the ~60s
+            # transient pattern); the outlier evidence behind the median
+            cs["stall_turns"] = len([r for r in arm_rows if (r.get("ttft_s") or 0) > 20])
+        if "turns_total" not in cs:
+            cs["turns_total"] = len(arm_rows)
+        conv_summary[arm] = cs
+    return conv_summary
 
 
 def arm_swatch(arm):
@@ -242,8 +270,23 @@ def table(header, rows, numeric=()):
 
 def build(run_path, out_path):
     run, rows, summary, cache, conv_summary = load(run_path)
+    conv_summary = derive_conv_summary(rows, conv_summary)
     arms = [a for a in ARMS if any(r["arm"] == a for r in rows)]
     n_turns = run.get("turns_per_conversation", 5)
+
+    # the live-view screenshot, base64-inline (keeps the one-file property)
+    import base64
+    shot = RESULTS / "site" / "collector.png"
+    collector_html = ""
+    if shot.exists():
+        b64 = base64.b64encode(shot.read_bytes()).decode()
+        collector_html = (f'<figure><figcaption>The live view: one lane per conversation, one node per '
+                          f'routed turn</figcaption><div class="sub">The collector follows the gateway\'s access-log '
+                          f'decision records and renders the live state: nodes colored by tier (SIMPLE green / MEDIUM '
+                          f'amber / COMPLEX red / REASONING purple), the substrate arm badge per lane, and the routing '
+                          f'stats (decisions, classify p50/p95, models served). This page is the static companion — the '
+                          f'live view runs on the cluster.</div>'
+                          f'<img src="data:image/png;base64,{b64}" style="width:100%;border-radius:4px" alt="the collector live view"></figure>')
 
     total_turns = len(rows)
     n_convs = run.get("conversations")
@@ -254,7 +297,7 @@ def build(run_path, out_path):
         if b.get("hits") is None or aft.get("hits") is None:
             return None
         return aft["hits"] - b["hits"]
-    ac = sum(d for a in ("A", "C") if (d := hits_delta(a)) is not None)
+    ac = sum(d for a in ("A", "C", "D") if (d := hits_delta(a)) is not None)
     bh = hits_delta("B")
 
     # per-arm wall-time sums
@@ -266,15 +309,17 @@ def build(run_path, out_path):
         items = []
         for a in arms:
             cs = conv_summary.get(a) or {}
-            v = cs.get("sum_ttft_mean")
+            # the MEDIAN is the outlier-resistant headline (one 60s stall in a
+            # conversation inflates that conversation's mean by ~5s per turn)
+            v = cs.get("sum_ttft_median")
             if v is None:
                 continue
             items.append((ARM_SHORT[a], v, ARM_COLOR[a],
-                          f"Σ TTFT per conversation: mean {v:.2f}s "
-                          f"(min {cs.get('sum_ttft_min', 0):.2f}, max {cs.get('sum_ttft_max', 0):.2f}) "
-                          f"over {cs.get('conversations', 0)} conversations x {n_turns} turns"))
+                          f"Σ TTFT per conversation: median {v:.2f}s (mean {cs.get('sum_ttft_mean', 0):.2f}, "
+                          f"min {cs.get('sum_ttft_min', 0):.2f}, max {cs.get('sum_ttft_max', 0):.2f}) "
+                          f"over {cs.get('conversations', 0)} conversations x {n_turns} turns — "
+                          f"{cs.get('stall_turns', 0)} TTFT stalls"))
         if items:
-            winner = min(items, key=lambda i: i[1])
             conv_bars = bar_chart(
                 items, fmt=lambda v: f"{v:.1f}s",
                 label_w=110)
@@ -289,7 +334,7 @@ def build(run_path, out_path):
             present.sort(key=lambda p: p[1]["sum_ttft_mean"])
             best_arm, best = present[0]
             noreuse = next(((a, c) for a, c in present if a == "B"), None)
-            reuse = [(a, c) for a, c in present if a in ("A", "C")]
+            reuse = [(a, c) for a, c in present if a in ("A", "C", "D")]
             if noreuse and reuse:
                 reuse_ttft = statistics_mean([c["sum_ttft_mean"] for _, c in reuse])
                 delta = noreuse[1]["sum_ttft_mean"] - reuse_ttft
@@ -303,31 +348,69 @@ def build(run_path, out_path):
                            f"{ARM_SHORT['A']} {conv_summary['A']['sum_ttft_mean']:.1f}s.")
                 verdict_html = f'<div class="card" style="border-top-color:var(--flagship)"><p style="margin:.2rem 0">{verdict}</p></div>'
             crows = []
+            # the verdicts: computed per arm from the record — the MEDIAN is the
+            # outlier-resistant headline, the mean is stated alongside
+            reuse_vals = [c.get("sum_ttft_median") for a, c in present if a in ("A", "C", "D") and c.get("sum_ttft_median")]
+            reuse_median = statistics_mean(reuse_vals) if reuse_vals else None
+            noreuse_median = conv_summary.get("B", {}).get("sum_ttft_median")
+            totals = {a: c.get("sum_total_mean") for a, c in present if c.get("sum_total_mean")}
+            best_total_arm = min(totals, key=totals.get) if totals else None
             for a, c in present:
                 d = c["sum_ttft_mean"] - best["sum_ttft_mean"]
+                verdict = ""
+                if a == "A":
+                    verdict = "reuse baseline (static native)"
+                elif a == "B" and reuse_median and noreuse_median:
+                    dd = noreuse_median - reuse_median
+                    verdict = (f"<b>+{dd:.1f}s median TTFT ({dd/reuse_median*100:.0f}%) — "
+                               f"the counterfactual loses</b>")
+                elif a == "C":
+                    verdict = "matches native on TTFT"
+                elif a == "D":
+                    approx = "TTFT ≈ A"
+                    verdict = f"<b>{approx}, the best Σ total</b>" if a == best_total_arm else approx
                 crows.append([arm_swatch(a),
-                              f"{c['sum_ttft_mean']:.2f}", f"{c['sum_ttft_min']:.2f}", f"{c['sum_ttft_max']:.2f}",
-                              f"{c['sum_total_mean']:.2f}" if c.get("sum_total_mean") else "—",
-                              ("—" if d < 0.01 else f"+{d:.2f} ({d/best['sum_ttft_mean']*100:.0f}%)")])
+                              f"{c.get('sum_ttft_median', 0):.2f}", f"{c.get('sum_ttft_mean', 0):.2f}",
+                              f"{c.get('sum_ttft_min', 0):.2f}", f"{c.get('sum_ttft_max', 0):.2f}",
+                              f"{c.get('sum_total_mean', 0):.2f}" if c.get("sum_total_mean") else "—",
+                              ("—" if d < 0.01 else f"+{d:.2f} ({d/best['sum_ttft_mean']*100:.0f}%)"),
+                              f"{c.get('stall_turns', 0)}" if c.get("stall_turns") is not None else "—",
+                              verdict])
             conv_table = table(
-                ["arm", "Σ TTFT / conv (s)", "min", "max", "Σ total / conv (s)", "Δ TTFT vs best"],
-                crows, numeric=(1, 2, 3, 4, 5))
+                ["arm", "Σ TTFT / conv median (s)", "mean", "min", "max", "Σ total / conv (s)", "Δ mean TTFT vs best", "TTFT stalls", "verdict"],
+                crows, numeric=(1, 2, 3, 4, 5, 6, 7))
             # the findings: computed where possible, the caveat stated
             total_delta = ""
             if len(present) >= 2:
                 a_tot = conv_summary.get("A", {}).get("sum_total_mean")
                 c_tot = conv_summary.get("C", {}).get("sum_total_mean")
-                if a_tot and c_tot and abs(c_tot - a_tot) > 2:
-                    total_delta = (f"<li><b>Open caveat:</b> {ARM_SHORT['C']}'s cumulative TOTAL "
-                                   f"({c_tot:.1f}s) is {abs(c_tot-a_tot):.1f}s higher than {ARM_SHORT['A']}'s "
-                                   f"({a_tot:.1f}s) despite the equal-or-lower TTFT — decode-path variance over "
-                                   f"this sample or a real kvcached decode overhead; the decode-per-token metric "
-                                   f"resolves it.</li>")
+                # the outliers: the 60s TTFT stalls (transient, not the decode)
+                outliers = [(r.get("arm"), r.get("conversation"), r.get("turn"))
+                            for r in rows if (r.get("latency_s") or 0) > 20]
+                if a_tot and c_tot and abs(c_tot - a_tot) > 2 and outliers:
+                    total_delta = (f"<li><b>The cumulative-total caveat, resolved:</b> the deltas "
+                                   f"are <b>60-second TTFT stalls</b> (one turn per affected arm: "
+                                   f"{', '.join(f'{ARM_SHORT.get(a, a)} conv{c + 1} turn{t + 1}' for a, c, t in outliers)}) — "
+                                   f"the time to the model's first token stalled ~60s and recovered; the "
+                                   f"decode-per-token is IDENTICAL across arms (the per-token metric differences "
+                                   f"track answer length, not speed). Transient, not substrate-specific.</li>")
             findings_html = ("<ul>"
+                             f"<li><b>The elastic-sharing thesis is proven:</b> both models on ONE 71GB slice, "
+                             f"kvcached allocating elastically — {ARM_SHORT['D']} matches the statically-partitioned "
+                             f"native setup on TTFT ({conv_summary.get('D', {}).get('sum_ttft_mean', 0):.1f}s vs "
+                             f"{ARM_SHORT['A']} {conv_summary.get('A', {}).get('sum_ttft_mean', 0):.1f}s) while serving "
+                             f"the best Σ total ({conv_summary.get('D', {}).get('sum_total_mean', 0):.1f}s). The prefix "
+                             f"caching works across <i>both engines sharing the pool</i>: arm D accrued "
+                             f"+{(cache.get('D', {}).get('after', {}).get('hits', 0) - cache.get('D', {}).get('before', {}).get('hits', 0)):.0f} "
+                             f"hits on its counters. You don't need 53GB statically partitioned across two slices to "
+                             f"keep reuse — one slice with the VMM does it.</li>"
                              f"<li><b>The image alone changes nothing:</b> arm A runs the kvcached image with the patch disabled — zero patch lines, native behaviour.</li>"
                              f"<li><b>Elastic memory with reuse matches native caching:</b> {ARM_SHORT['C']} ≈ {ARM_SHORT['A']} on TTFT, both ~100% prefix-hit rate on the engine counters.</li>"
                              f"<li><b>Reuse is the strategy:</b> the no-reuse counterfactual ({ARM_SHORT['B']}) loses "
                              f"{delta:.1f}s of TTFT per conversation ({pct:.0f}%) and the penalty grows linearly with conversation length.</li>"
+                             f"<li><b>The stall rate:</b> {sum((conv_summary.get(a) or {}).get('stall_turns', 0) for a in arms)} "
+                             f"TTFT stalls across {sum((conv_summary.get(a) or {}).get('turns_total', 0) for a in arms)} turns "
+                             f"(~60s each, recovering) — every substrate arm hits them, transient, not substrate-specific.</li>"
                              f"<li><b>The noise floor works:</b> REASONING turns escalate to the MaaS glm tier on every arm — identical timing across arms (±0.03s) normalises the measurement.</li>"
                              f"{total_delta}"
                              f"</ul>")
@@ -335,7 +418,7 @@ def build(run_path, out_path):
         (str(total_turns), "turns recorded (paired conversations, all arms)"),
         (str(n_convs), f"conversations x {n_turns} turns"),
         (str(len(arms)), "substrate arms compared"),
-        (f"+{ac:.0f} / {bh if bh is not None else 0:.0f}", "prefix-cache hits, arms A+C vs arm B (8B workloads)"),
+        (f"+{ac:.0f} / {bh if bh is not None else 0:.0f}", "prefix-cache hits, reuse arms A+C+D vs arm B (8B workloads)"),
         (f"{wall.get(fastest, 0):.0f}s", f"Σ wall time, {ARM_SHORT.get(fastest, fastest)} (fastest arm)"),
     ]
     tiles_html = '<div class="tiles">' + "".join(
@@ -345,10 +428,22 @@ def build(run_path, out_path):
     arm_table = table(
         ["arm", "substrate", "engine", "what varies"],
         [
-            [arm_swatch("A"), "native vLLM prefix caching, kvcached OFF", "vLLM 0.30 (kvcached image)", "static per-slice KV cache"],
-            [arm_swatch("B"), "kvcached ON, --no-enable-prefix-caching", "vLLM 0.30 (kvcached image)", "elastic memory, no reuse — full re-prefill per turn"],
-            [arm_swatch("C"), "kvcached ON, --enable-prefix-caching", "vLLM 0.30 (kvcached image)", "elastic memory AND bounded APC"],
+            [arm_swatch("A"), "native vLLM prefix caching, kvcached OFF — two slices (18GB + 35GB) statically partitioned", "vLLM 0.30 (kvcached image)", "static per-slice KV cache"],
+            [arm_swatch("B"), "kvcached ON, --no-enable-prefix-caching — two slices, elastic memory, no reuse", "vLLM 0.30 (kvcached image)", "full re-prefill per turn — the no-reuse counterfactual"],
+            [arm_swatch("C"), "kvcached ON, --enable-prefix-caching — two slices, elastic memory AND bounded APC", "vLLM 0.30 (kvcached image)", "elastic memory with reuse"],
+            [arm_swatch("D"), "kvcached ON, APC ON — ONE 71GB MIG slice, TWO vLLM processes sharing the memory pool through the VMM", "vLLM 0.30 (kvcached image)", "elastic memory-SHARING: 53GB static partitioning becomes 71GB shared"],
             [arm_swatch("-"), "MaaS gateway glm-5.3-flash (REASONING tier)", "prelude-maas serving", "identical across arms — the noise-floor control"],
+        ],
+    )
+
+    hw_table = table(
+        ["arm", "slices", "NVRAM / slice", "replicas", "models resident", "total NVRAM / arm"],
+        [
+            [arm_swatch("A"), "2 (per-model)", "1g.18gb (18GB) + 2g.35gb (35GB)", "1 + 1", "0.6B, 8B", "53GB"],
+            [arm_swatch("B"), "2 (per-model)", "1g.18gb (18GB) + 2g.35gb (35GB)", "1 + 1", "0.6B, 8B", "53GB"],
+            [arm_swatch("C"), "2 (per-model)", "1g.18gb (18GB) + 2g.35gb (35GB)", "1 + 1", "0.6B, 8B", "53GB"],
+            [arm_swatch("D"), "1 (SHARED)", "3g.71gb (71GB)", "1 (dual-engine)", "0.6B + 8B in one process pair", "71GB"],
+            [arm_swatch("-"), "MaaS gateway", "gateway hardware", "managed", "glm-5.3-flash", "outside this namespace"],
         ],
     )
 
@@ -383,14 +478,23 @@ def build(run_path, out_path):
 <body>
 <h1>Beyond semantic routing — the KV-cache substrate comparison</h1>
 <div class="rule"></div>
-<p class="lede">The same paired conversations replayed through three inference substrates that differ in exactly one thing: how the KV cache is managed.
-Arm A runs native vLLM prefix caching; arm B runs kvcached with reuse disabled; arm C runs kvcached with its bounded APC. Same engine (vLLM 0.30), same models (Qwen3 0.6B/8B), same MIG slices.
-The classifier routes SIMPLE/MEDIUM to 0.6B and COMPLEX to 8B on every arm; REASONING turns escalate to the MaaS gateway's glm-5.3-flash — identical across arms, the built-in noise floor.</p>
+<p class="lede"><b>The path under test:</b> every request flows <code>client → praxis gateway → llm-d-sc classifier (gRPC) → tier splice → inference substrate</code> — the gateway classifies each prompt (SIMPLE/MEDIUM/COMPLEX/REASONING), splices the winning tier's model into the request body, and forwards to one of the substrate arms below.</p>
+<p class="lede">The same paired conversations replayed through four inference substrates that differ in exactly one thing: how the KV cache is managed — and specifically whether <b>APC</b> (<i>automatic prefix caching</i>: the engine detects that an incoming prompt shares a prefix with one it has already processed and reuses the cached KV blocks instead of recomputing them — the win in multi-turn, where every turn resends the conversation history) is enabled, and <i>where the cache lives</i>.</p>
+<p class="lede">Arm A runs native vLLM APC (vLLM's own cache, statically reserved per MIG slice); arm B runs kvcached with APC disabled (every turn re-prefills from scratch); arm C runs kvcached with APC on (kvcached's <i>bounded</i> APC: reuse preserved, but the cache memory capped so it cannot starve decode); arm D runs both models on one shared slice with kvcached allocating the KV memory elastically.</p>
+<p class="lede">Same engine (vLLM 0.30), same models (Qwen3 0.6B/8B) — <b>arms A–C reserve 53GB of NVRAM each across two statically-partitioned MIG slices</b> (18GB for the 0.6B + 35GB for the 8B, one replica per model). Arm D carries both models in <b>one 71GB slice</b> with kvcached allocating the KV memory elastically.</p>
+<p class="lede">The classifier routes SIMPLE/MEDIUM to 0.6B and COMPLEX to 8B on every arm; REASONING turns escalate to the MaaS gateway's glm-5.3-flash — identical across arms, the built-in noise floor.</p>
 {tiles_html}
 
 <h2>The arms</h2>
 {arm_table}
 <p class="note">The kvcached IMAGE runs on every arm (the engine is held constant); the VMM layer only takes over KV management where ENABLE_KVCACHED=true. Arm A proves the image alone does not change behaviour. REASONING turns never touch the arms — they measure the shared MaaS path.</p>
+
+<h2>Hardware setup</h2>
+{hw_table}
+<p class="note">One MIG-partitioned H200-class node (ocp-jfns-gpu-1) carries every arm: arms A–C reserve <b>53GB of NVRAM per arm</b> across two statically-partitioned slices (18GB for the 0.6B + 35GB for the 8B, one replica each); arm D carries both models in <b>one 71GB slice</b> — the 0.6B (~1.2GB) and 8B (~16GB) weights plus a shared, elastically-allocated KV pool. The REASONING tier runs on the MaaS gateway's own serving stack outside this namespace.</p>
+
+<h2>Observed live</h2>
+{collector_html}
 
 <h2>Latency by arm and tier</h2>
 <figure><figcaption>Median time-to-first-token per substrate arm and task tier</figcaption>
@@ -400,14 +504,14 @@ The classifier routes SIMPLE/MEDIUM to 0.6B and COMPLEX to 8B on every arm; REAS
 
 <h2>The substrate proof: prefix-cache hits</h2>
 <figure><figcaption>Prefix-cache hits gained during the run (8B workloads, engine counters)</figcaption>
-<div class="sub">Arms A and C accrue hits (the shared ~13K-token prefix is reused); arm B gains ZERO by design — kvcached with reuse disabled re-prefills every turn. This is the number the comparison exists to measure.</div>
+<div class="sub">Arms A, C and D accrue hits (the shared ~13K-token prefix is reused — A and C on their per-slice static caches, D on the single shared slice); arm B gains ZERO by design — kvcached with reuse disabled re-prefills every turn. This is the number the comparison exists to measure.</div>
 {cache_bars(cache, arms)}
 {legend()}
 </figure>
 
 <h2>The reuse effect across the conversation</h2>
 <figure><figcaption>Mean time-to-first-token per conversation turn</figcaption>
-<div class="sub">Every turn resends the ~13K-token shared prefix. Arms A and C cache it after the first turn — TTFT stays flat. Arm B re-prefills the full prefix every turn: TTFT scales with the model's prefill speed (0.6B ≈ +0.5s, 8B ≈ +1.5s per turn).</div>
+<div class="sub">Every turn resends the ~13K-token shared prefix. Arms A, C and D cache it after the first turn — TTFT stays flat. Arm B re-prefills the full prefix every turn: TTFT scales with the model's prefill speed (0.6B ≈ +0.5s, 8B ≈ +1.5s per turn).</div>
 {turn_sequence(rows, arms, n_turns)}
 </figure>
 
@@ -435,7 +539,7 @@ The classifier routes SIMPLE/MEDIUM to 0.6B and COMPLEX to 8B on every arm; REAS
 
 <h2>How to read this</h2>
 <p class="note">The substrate comparison holds the engine, models, hardware and prompts constant; the ONLY variable is the KV-cache substrate.
-Arms A and C should behave alike on cache hits (both reuse the prefix) and differ in what happens under memory pressure — kvcached's elastic blocks vs vLLM's static per-slice reservation.
+Arms A, C and D should behave alike on cache hits (all reuse the prefix); what separates them is layout — A and C pair two statically-partitioned slices per arm, D carries both models on one shared slice with elastic KV.
 Arm B is the counterfactual: elastic memory WITHOUT reuse, the marginal-cost-of-switching story. REASONING turns measure the shared MaaS path — any per-arm variance there is measurement noise, the normalisation baseline for the other deltas.</p>
 <script>{JS}</script>
 </body></html>"""

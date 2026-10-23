@@ -21,5 +21,4 @@ demo/evidence/
 *.swp
 .DS_Store
 node_modules/
-
 __pycache__/

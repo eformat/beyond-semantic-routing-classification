@@ -231,6 +231,31 @@ class Store:
         with self.lock:
             self.reconnects += 1
 
+    def reset(self):
+        """Clear the dashboard state: the sessions, the decision events and the
+        aggregates go; the log-follow position and the request_id dedup set
+        stay (the tail re-reads must not re-ingest). The seq counter keeps
+        climbing so the UI's per-node keys stay unique."""
+        with self.lock:
+            cleared = {"sessions": len(self.sessions), "events": len(self.events),
+                       "decisions": self.decisions_total}
+            self.events = []
+            self.sessions = OrderedDict()
+            self.decisions_total = 0
+            self.label_counts = {}
+            self.model_counts = {}
+            self.status_counts = {}
+            self.classify_lat = []
+            self.request_durs = []
+            self.latency_hist = [0] * (len(LATENCY_BUCKETS) + 1)
+            self.request_hist = [0] * (len(REQUEST_BUCKETS) + 1)
+            self.sessions_total = 0
+            self.recent_session_ts = []
+            self.session_event_ts = []
+            # records_total / log_reconnects / seen_requests stay: the log's
+            # history is real, and the dedup prevents the tail re-ingestion
+            return {"ok": True, "cleared": cleared}
+
     # -- queries --------------------------------------------------------------
 
     def _pct(self, samples, q):
@@ -351,9 +376,9 @@ def parse_session(rec):
 
     PHASE 2: the arm suffix — the phase-2 cluster names carry the arm prefix
     (a- = native prefix caching, b- = kvcached with no APC, c- = kvcached +
-    APC), so the SAME conversation replayed through the three arms renders as
-    three lanes side by side (c:<fp> vs c:<fp>:a / :b / :c) — the substrate
-    comparison view.
+    APC, d- = one shared slice), so the SAME conversation replayed through the
+    four arms renders as four lanes side by side (c:<fp> vs c:<fp>:a / :b /
+    :c / :d) — the substrate comparison view.
     """
     cluster = rec.get("cluster") or ""
     arm = ""
@@ -361,6 +386,8 @@ def parse_session(rec):
         arm = ":b"
     elif cluster.startswith("c-"):
         arm = ":c"
+    elif cluster.startswith("d-"):
+        arm = ":d"
     elif cluster.startswith("a-"):
         arm = ":a"
     fp = _field(rec, "metadata.llm_d_sc.session_fp")
@@ -397,7 +424,7 @@ def record_to_decision(rec):
     if not any(k.startswith("metadata.llm_d_sc.") for k in rec):
         return None  # a record without a decision (e.g. /models passthrough)
     cluster = rec.get("cluster") or ""
-    arm = "b" if cluster.startswith("b-") else ("c" if cluster.startswith("c-") else ("a" if cluster.startswith("a-") else None))
+    arm = "b" if cluster.startswith("b-") else ("c" if cluster.startswith("c-") else ("d" if cluster.startswith("d-") else ("a" if cluster.startswith("a-") else None)))
     return {
         "session": parse_session(rec),
         "request_id": rec.get("request_id"),
@@ -625,6 +652,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, STORE.metrics_text().encode(), "text/plain; version=0.0.4")
         elif path == "/healthz":
             self._json(200, {"ok": True})
+        elif path == "/reset":
+            self._json(200, STORE.reset())
         else:
             self._json(404, {"error": "not found"})
 
