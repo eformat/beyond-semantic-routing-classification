@@ -1,0 +1,48 @@
+name: publish-results-site
+
+# Publishes the matrix results site to GitHub Pages. The site is REBUILT from
+# the newest results/*-matrix.json at deploy time (the builder inlines
+# results/site/collector.png base64 — the one-file property holds), so pushing
+# a new run record republishes with the fresh narrative — no stale-site drift.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "results/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: rebuild the site from the newest run record
+        run: python3 hack/build_matrix_site.py --out results/site/index.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: results/site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
